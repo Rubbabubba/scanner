@@ -16,24 +16,32 @@ FUTURES_ENABLED = os.getenv("FUTURES_ENABLED", "0").strip().lower() in ("1", "tr
 if FUTURES_ENABLED:
     from kraken_futures import futures_snapshot
 
+# Refresh + selection
 REFRESH_SEC = int(os.getenv("SCAN_REFRESH_SEC", "300") or 300)  # 5m
 TOP_N = int(os.getenv("TOP_N", "5") or 5)
 QUOTE_ALLOW = [q.strip().upper() for q in os.getenv("QUOTE_ALLOW", "USD,USDT,USDC").split(",") if q.strip()]
-MIN_24H_USD_VOL = float(os.getenv("MIN_24H_USD_VOL", "2500000") or 2500000)  # $2.5m
-MIN_24H_RANGE_PCT = float(os.getenv("MIN_24H_RANGE_PCT", "0.05") or 0.05)     # 5%
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004") or 0.004)         # 0.40%
 MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250") or 250)
 
-# NEW: de-dupe by base (avoid ETH/USDT + ETH/USDC consuming two slots)
-DEDUP_BY_BASE = os.getenv("DEDUP_BY_BASE", "1").strip().lower() in ("1", "true", "yes", "on")
+# Strict "IN PLAY" thresholds
+MIN_24H_USD_VOL = float(os.getenv("MIN_24H_USD_VOL", "2500000") or 2500000)  # $2.5m
+MIN_24H_RANGE_PCT = float(os.getenv("MIN_24H_RANGE_PCT", "0.05") or 0.05)     # 5%
 
-# NEW: ensure we always return TOP_N (fill from best remaining candidates)
+# Spread sanity
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004") or 0.004)         # 0.40%
+
+# De-dupe and fill behavior
+DEDUP_BY_BASE = os.getenv("DEDUP_BY_BASE", "1").strip().lower() in ("1", "true", "yes", "on")
 FILL_TO_TOP_N = os.getenv("FILL_TO_TOP_N", "1").strip().lower() in ("1", "true", "yes", "on")
 
-app = FastAPI(title="Crypto Scanner", version="1.0.2")
+# Fallback thresholds (used ONLY to fill to TOP_N)
+# These are intentionally looser.
+FALLBACK_MIN_24H_USD_VOL = float(os.getenv("FALLBACK_MIN_24H_USD_VOL", "750000") or 750000)  # $0.75m
+FALLBACK_MIN_24H_RANGE_PCT = float(os.getenv("FALLBACK_MIN_24H_RANGE_PCT", "0.03") or 0.03)  # 3%
+
+app = FastAPI(title="Crypto Scanner", version="1.0.3")
 
 CACHE: Dict[str, Any] = {
-    "ts": None,              # epoch seconds
+    "ts": None,
     "active_symbols": [],
     "reasons": {},
     "scores": {},
@@ -57,6 +65,25 @@ def _base(sym: str) -> str:
     return sym.split("/", 1)[0].upper()
 
 
+def _spread_ok(sym: str) -> Tuple[bool, float | None]:
+    """
+    Returns (ok, spread_pct_or_none).
+    If the book call fails, we treat spread as unknown (None) and allow it.
+    """
+    try:
+        bid, ask = best_bid_ask(sym)
+        mid = (bid + ask) / 2.0
+        spread_pct = (ask - bid) / mid if mid > 0 else 1.0
+        return (spread_pct <= MAX_SPREAD_PCT), spread_pct
+    except Exception:
+        return True, None
+
+
+def _atr_for(sym: str) -> float:
+    closes = ohlc_close_series(sym, interval_min=15, bars=80)
+    return compute_atr(closes, period=14)
+
+
 def refresh() -> None:
     pairs = list_spot_pairs(quotes=QUOTE_ALLOW, limit=MAX_PAIRS)
     tick = ticker_24h(pairs)
@@ -68,10 +95,21 @@ def refresh() -> None:
         except Exception:
             fut = None
 
-    scored: List[Tuple[str, float, List[str], float, float]] = []
-    # tuple: (sym, total_score, reasons, vol_usd, range_pct)
+    # Pools:
+    # - in_play: strict thresholds
+    # - fallback: looser thresholds, used only to fill up to TOP_N
+    in_play: List[Tuple[str, float, List[str], float, float]] = []
+    fallback: List[Tuple[str, float, List[str], float, float]] = []
+    # tuple = (sym, total_score, reasons, vol_usd, range_pct)
+
+    # For meta/debug
+    seen_pairs = 0
+    spread_filtered = 0
+    in_play_prefilter = 0
+    fallback_prefilter = 0
 
     for sym in pairs:
+        seen_pairs += 1
         t = tick.get(sym)
         if not t:
             continue
@@ -79,26 +117,13 @@ def refresh() -> None:
         usd_vol = float(t["vol_usd"])
         rng = float(t["range_pct"])
 
-        if usd_vol < MIN_24H_USD_VOL:
+        ok_spread, spread_pct = _spread_ok(sym)
+        if not ok_spread:
+            spread_filtered += 1
             continue
-        if rng < MIN_24H_RANGE_PCT:
-            continue
 
-        # Spread sanity
-        spread_pct = None
-        try:
-            bid, ask = best_bid_ask(sym)
-            mid = (bid + ask) / 2.0
-            spread_pct = (ask - bid) / mid if mid > 0 else 1.0
-            if spread_pct > MAX_SPREAD_PCT:
-                continue
-        except Exception:
-            spread_pct = None
-
-        # ATR activity proxy
-        closes = ohlc_close_series(sym, interval_min=15, bars=80)
-        atr = compute_atr(closes, period=14)
-
+        # Compute ATR + score (once)
+        atr = _atr_for(sym)
         spot_score, spot_reasons = score_spot(t, atr=atr, spread_pct=spread_pct)
 
         bonus = 0.0
@@ -107,52 +132,73 @@ def refresh() -> None:
             bonus, bonus_reasons = score_futures_bonus(sym, fut)
 
         total = float(spot_score + bonus)
-        if total <= 0:
-            continue
-
         reasons = spot_reasons + bonus_reasons
-        scored.append((sym, total, reasons, usd_vol, rng))
 
-    pre_dedup_count = len(scored)
+        # Strict in-play eligibility
+        if usd_vol >= MIN_24H_USD_VOL and rng >= MIN_24H_RANGE_PCT:
+            in_play_prefilter += 1
+            if total > 0:
+                in_play.append((sym, total, reasons, usd_vol, rng))
 
-    # ✅ NEW: de-dupe by base (keep best quote per base)
-    if DEDUP_BY_BASE and scored:
-        best_by_base: Dict[str, Tuple[str, float, List[str], float, float]] = {}
-        for sym, total, reasons, usd_vol, rng in scored:
+        # Fallback eligibility (looser)
+        if usd_vol >= FALLBACK_MIN_24H_USD_VOL and rng >= FALLBACK_MIN_24H_RANGE_PCT:
+            fallback_prefilter += 1
+            if total > 0:
+                # Mark that this came from fallback if it wasn't already in_play
+                fb_reasons = reasons[:]  # copy
+                if not (usd_vol >= MIN_24H_USD_VOL and rng >= MIN_24H_RANGE_PCT):
+                    fb_reasons = fb_reasons + ["fallback_pool"]
+                fallback.append((sym, total, fb_reasons, usd_vol, rng))
+
+    pre_in_play = len(in_play)
+    pre_fallback = len(fallback)
+
+    # De-dupe by base in each pool (keep best quote per base)
+    def dedup(pool: List[Tuple[str, float, List[str], float, float]]) -> List[Tuple[str, float, List[str], float, float]]:
+        if not DEDUP_BY_BASE or not pool:
+            return pool
+        best: Dict[str, Tuple[str, float, List[str], float, float]] = {}
+        for sym, total, reasons, vol, rng in pool:
             b = _base(sym)
-            prev = best_by_base.get(b)
+            prev = best.get(b)
             if prev is None:
-                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+                best[b] = (sym, total, reasons, vol, rng)
                 continue
+            ps, pt, pr, pv, prng = prev
+            # score > volume > range tie-break
+            if total > pt or (total == pt and vol > pv) or (total == pt and vol == pv and rng > prng):
+                best[b] = (sym, total, reasons, vol, rng)
+        return list(best.values())
 
-            prev_sym, prev_total, prev_reasons, prev_vol, prev_rng = prev
+    in_play = dedup(in_play)
+    fallback = dedup(fallback)
 
-            # prefer higher score
-            if total > prev_total:
-                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
-            # tie-breaker: higher volume
-            elif total == prev_total and usd_vol > prev_vol:
-                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
-            # next tie-breaker: higher range
-            elif total == prev_total and usd_vol == prev_vol and rng > prev_rng:
-                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+    post_in_play = len(in_play)
+    post_fallback = len(fallback)
 
-        scored = list(best_by_base.values())
+    # Sort helper: score then volume then range
+    def sort_key(x):
+        return (x[1], x[3], x[4])
 
-    post_dedup_count = len(scored)
+    in_play.sort(key=sort_key, reverse=True)
+    fallback.sort(key=sort_key, reverse=True)
 
-    # Sort by score, then by volume, then by range
-    scored.sort(key=lambda x: (x[1], x[3], x[4]), reverse=True)
+    # Select from in_play first
+    top: List[Tuple[str, float, List[str], float, float]] = in_play[:TOP_N]
 
-    top = scored[:TOP_N]
+    # Fill from fallback if needed
+    if FILL_TO_TOP_N and len(top) < TOP_N:
+        chosen_bases = {_base(s) for (s, _, _, _, _) in top}
+        for item in fallback:
+            if len(top) >= TOP_N:
+                break
+            b = _base(item[0])
+            if b in chosen_bases:
+                continue
+            top.append(item)
+            chosen_bases.add(b)
 
-    # ✅ NEW: fill to TOP_N if we have fewer than TOP_N
-    if FILL_TO_TOP_N and len(top) < TOP_N and scored:
-        selected = {s for (s, _, _, _, _) in top}
-        remainder = [x for x in scored if x[0] not in selected]
-        remainder.sort(key=lambda x: (x[1], x[3], x[4]), reverse=True)
-        top = top + remainder[: (TOP_N - len(top))]
-
+    # Final cache
     CACHE["ts"] = time.time()
     CACHE["active_symbols"] = [s for (s, _, _, _, _) in top]
     CACHE["scores"] = {s: float(sc) for (s, sc, _, _, _) in top}
@@ -160,11 +206,25 @@ def refresh() -> None:
     CACHE["last_error"] = None
     CACHE["raw"] = {
         "universe": len(pairs),
-        "scored_prefilter": pre_dedup_count,
-        "scored_postdedup": post_dedup_count,
+        "seen_pairs": seen_pairs,
+        "spread_filtered": spread_filtered,
+        "in_play_prefilter_count": in_play_prefilter,
+        "fallback_prefilter_count": fallback_prefilter,
+        "in_play_scored_prefilter": pre_in_play,
+        "fallback_scored_prefilter": pre_fallback,
+        "in_play_scored_postdedup": post_in_play,
+        "fallback_scored_postdedup": post_fallback,
         "returned": len(top),
         "dedup_by_base": DEDUP_BY_BASE,
         "fill_to_top_n": FILL_TO_TOP_N,
+        "strict_thresholds": {
+            "min_24h_usd_vol": MIN_24H_USD_VOL,
+            "min_24h_range_pct": MIN_24H_RANGE_PCT,
+        },
+        "fallback_thresholds": {
+            "min_24h_usd_vol": FALLBACK_MIN_24H_USD_VOL,
+            "min_24h_range_pct": FALLBACK_MIN_24H_RANGE_PCT,
+        },
     }
 
 
