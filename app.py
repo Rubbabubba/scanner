@@ -3,53 +3,49 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from scanner.kraken_spot import (
-    list_spot_pairs,
-    ticker_24h,
-    ohlc_close_series,
-    best_bid_ask,
-)
-from scanner.scoring import (
-    compute_atr,
-    score_spot,
-    score_futures_bonus,
-)
+# ✅ root-level imports (repo is flat)
+from kraken_spot import list_spot_pairs, ticker_24h, ohlc_close_series, best_bid_ask
+from scoring import compute_atr, score_spot, score_futures_bonus
 
-# Optional futures module (bonus only)
-FUTURES_ENABLED = os.getenv("FUTURES_ENABLED", "0").strip() in ("1", "true", "yes", "on")
+FUTURES_ENABLED = os.getenv("FUTURES_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 if FUTURES_ENABLED:
-    from scanner.kraken_futures import futures_snapshot
+    from kraken_futures import futures_snapshot
 
-REFRESH_SEC = int(os.getenv("SCAN_REFRESH_SEC", "300"))  # 5m
-TOP_N = int(os.getenv("TOP_N", "5"))
+REFRESH_SEC = int(os.getenv("SCAN_REFRESH_SEC", "300") or 300)  # 5m
+TOP_N = int(os.getenv("TOP_N", "5") or 5)
 QUOTE_ALLOW = [q.strip().upper() for q in os.getenv("QUOTE_ALLOW", "USD,USDT,USDC").split(",") if q.strip()]
-MIN_24H_USD_VOL = float(os.getenv("MIN_24H_USD_VOL", "2500000"))  # $2.5m
-MIN_24H_RANGE_PCT = float(os.getenv("MIN_24H_RANGE_PCT", "0.05")) # 5%
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004"))      # 0.40%
-MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250"))                    # cap universe for speed
+MIN_24H_USD_VOL = float(os.getenv("MIN_24H_USD_VOL", "2500000") or 2500000)  # $2.5m
+MIN_24H_RANGE_PCT = float(os.getenv("MIN_24H_RANGE_PCT", "0.05") or 0.05)     # 5%
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004") or 0.004)         # 0.40%
+MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250") or 250)
 
-app = FastAPI(title="Crypto Scanner", version="1.0.0")
+app = FastAPI(title="Crypto Scanner", version="1.0.1")
 
 CACHE: Dict[str, Any] = {
-    "ts": None,
+    "ts": None,              # epoch seconds
     "active_symbols": [],
     "reasons": {},
     "scores": {},
+    "last_error": None,
+    "raw": None,
 }
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def should_refresh() -> bool:
     ts = CACHE["ts"]
     if ts is None:
         return True
     return (time.time() - ts) >= REFRESH_SEC
+
 
 def refresh() -> None:
     pairs = list_spot_pairs(quotes=QUOTE_ALLOW, limit=MAX_PAIRS)
@@ -71,7 +67,6 @@ def refresh() -> None:
         if not t:
             continue
 
-        # Liquidity / activity prefilter
         usd_vol = float(t["vol_usd"])
         rng = float(t["range_pct"])
 
@@ -80,7 +75,8 @@ def refresh() -> None:
         if rng < MIN_24H_RANGE_PCT:
             continue
 
-        # Spread sanity check
+        # Spread sanity
+        spread_pct = None
         try:
             bid, ask = best_bid_ask(sym)
             mid = (bid + ask) / 2.0
@@ -88,10 +84,10 @@ def refresh() -> None:
             if spread_pct > MAX_SPREAD_PCT:
                 continue
         except Exception:
-            # If book call fails, don't auto-exclude; just proceed.
+            # If book call fails, don't exclude; proceed without spread bonus/penalty
             spread_pct = None
 
-        # ATR expansion proxy using close series (15m by default)
+        # ATR activity proxy
         closes = ohlc_close_series(sym, interval_min=15, bars=80)
         atr = compute_atr(closes, period=14)
 
@@ -108,7 +104,7 @@ def refresh() -> None:
 
         reasons = spot_reasons + bonus_reasons
         scored.append((sym, total, reasons))
-        scores_map[sym] = total
+        scores_map[sym] = float(total)
         reasons_map[sym] = reasons
 
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -118,10 +114,21 @@ def refresh() -> None:
     CACHE["active_symbols"] = [s for (s, _, _) in top]
     CACHE["scores"] = {s: float(sc) for (s, sc, _) in top}
     CACHE["reasons"] = {s: rs for (s, _, rs) in top}
+    CACHE["last_error"] = None
+    CACHE["raw"] = {"universe": len(pairs), "scored": len(scored)}
+
 
 @app.get("/health")
 def health():
-    return {"ok": True, "utc": utc_now_iso(), "futures_enabled": FUTURES_ENABLED}
+    return {
+        "ok": True,
+        "utc": utc_now_iso(),
+        "futures_enabled": FUTURES_ENABLED,
+        "refresh_sec": REFRESH_SEC,
+        "quote_allow": QUOTE_ALLOW,
+        "last_error": CACHE["last_error"],
+    }
+
 
 @app.get("/active_coins")
 def active_coins():
@@ -129,17 +136,27 @@ def active_coins():
         try:
             refresh()
         except Exception as e:
+            CACHE["ts"] = time.time()
+            CACHE["last_error"] = str(e)
             return JSONResponse(
                 status_code=200,
-                content={"ok": False, "utc": utc_now_iso(), "error": str(e), "active_symbols": CACHE["active_symbols"]},
+                content={
+                    "ok": False,
+                    "utc": utc_now_iso(),
+                    "error": str(e),
+                    "active_symbols": CACHE.get("active_symbols", []),
+                },
             )
+
     return {
         "ok": True,
         "utc": utc_now_iso(),
         "active_symbols": CACHE["active_symbols"],
         "scores": CACHE["scores"],
         "reasons": CACHE["reasons"],
+        "meta": CACHE["raw"],
         "refresh_sec": REFRESH_SEC,
         "quote_allow": QUOTE_ALLOW,
         "futures_enabled": FUTURES_ENABLED,
+        "last_error": CACHE["last_error"],
     }
