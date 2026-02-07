@@ -24,7 +24,13 @@ MIN_24H_RANGE_PCT = float(os.getenv("MIN_24H_RANGE_PCT", "0.05") or 0.05)     # 
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004") or 0.004)         # 0.40%
 MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250") or 250)
 
-app = FastAPI(title="Crypto Scanner", version="1.0.1")
+# NEW: de-dupe by base (avoid ETH/USDT + ETH/USDC consuming two slots)
+DEDUP_BY_BASE = os.getenv("DEDUP_BY_BASE", "1").strip().lower() in ("1", "true", "yes", "on")
+
+# NEW: ensure we always return TOP_N (fill from best remaining candidates)
+FILL_TO_TOP_N = os.getenv("FILL_TO_TOP_N", "1").strip().lower() in ("1", "true", "yes", "on")
+
+app = FastAPI(title="Crypto Scanner", version="1.0.2")
 
 CACHE: Dict[str, Any] = {
     "ts": None,              # epoch seconds
@@ -47,6 +53,10 @@ def should_refresh() -> bool:
     return (time.time() - ts) >= REFRESH_SEC
 
 
+def _base(sym: str) -> str:
+    return sym.split("/", 1)[0].upper()
+
+
 def refresh() -> None:
     pairs = list_spot_pairs(quotes=QUOTE_ALLOW, limit=MAX_PAIRS)
     tick = ticker_24h(pairs)
@@ -58,9 +68,8 @@ def refresh() -> None:
         except Exception:
             fut = None
 
-    scored: List[Tuple[str, float, List[str]]] = []
-    scores_map: Dict[str, float] = {}
-    reasons_map: Dict[str, List[str]] = {}
+    scored: List[Tuple[str, float, List[str], float, float]] = []
+    # tuple: (sym, total_score, reasons, vol_usd, range_pct)
 
     for sym in pairs:
         t = tick.get(sym)
@@ -84,7 +93,6 @@ def refresh() -> None:
             if spread_pct > MAX_SPREAD_PCT:
                 continue
         except Exception:
-            # If book call fails, don't exclude; proceed without spread bonus/penalty
             spread_pct = None
 
         # ATR activity proxy
@@ -98,24 +106,66 @@ def refresh() -> None:
         if fut is not None:
             bonus, bonus_reasons = score_futures_bonus(sym, fut)
 
-        total = spot_score + bonus
+        total = float(spot_score + bonus)
         if total <= 0:
             continue
 
         reasons = spot_reasons + bonus_reasons
-        scored.append((sym, total, reasons))
-        scores_map[sym] = float(total)
-        reasons_map[sym] = reasons
+        scored.append((sym, total, reasons, usd_vol, rng))
 
-    scored.sort(key=lambda x: x[1], reverse=True)
+    pre_dedup_count = len(scored)
+
+    # ✅ NEW: de-dupe by base (keep best quote per base)
+    if DEDUP_BY_BASE and scored:
+        best_by_base: Dict[str, Tuple[str, float, List[str], float, float]] = {}
+        for sym, total, reasons, usd_vol, rng in scored:
+            b = _base(sym)
+            prev = best_by_base.get(b)
+            if prev is None:
+                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+                continue
+
+            prev_sym, prev_total, prev_reasons, prev_vol, prev_rng = prev
+
+            # prefer higher score
+            if total > prev_total:
+                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+            # tie-breaker: higher volume
+            elif total == prev_total and usd_vol > prev_vol:
+                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+            # next tie-breaker: higher range
+            elif total == prev_total and usd_vol == prev_vol and rng > prev_rng:
+                best_by_base[b] = (sym, total, reasons, usd_vol, rng)
+
+        scored = list(best_by_base.values())
+
+    post_dedup_count = len(scored)
+
+    # Sort by score, then by volume, then by range
+    scored.sort(key=lambda x: (x[1], x[3], x[4]), reverse=True)
+
     top = scored[:TOP_N]
 
+    # ✅ NEW: fill to TOP_N if we have fewer than TOP_N
+    if FILL_TO_TOP_N and len(top) < TOP_N and scored:
+        selected = {s for (s, _, _, _, _) in top}
+        remainder = [x for x in scored if x[0] not in selected]
+        remainder.sort(key=lambda x: (x[1], x[3], x[4]), reverse=True)
+        top = top + remainder[: (TOP_N - len(top))]
+
     CACHE["ts"] = time.time()
-    CACHE["active_symbols"] = [s for (s, _, _) in top]
-    CACHE["scores"] = {s: float(sc) for (s, sc, _) in top}
-    CACHE["reasons"] = {s: rs for (s, _, rs) in top}
+    CACHE["active_symbols"] = [s for (s, _, _, _, _) in top]
+    CACHE["scores"] = {s: float(sc) for (s, sc, _, _, _) in top}
+    CACHE["reasons"] = {s: rs for (s, _, rs, _, _) in top}
     CACHE["last_error"] = None
-    CACHE["raw"] = {"universe": len(pairs), "scored": len(scored)}
+    CACHE["raw"] = {
+        "universe": len(pairs),
+        "scored_prefilter": pre_dedup_count,
+        "scored_postdedup": post_dedup_count,
+        "returned": len(top),
+        "dedup_by_base": DEDUP_BY_BASE,
+        "fill_to_top_n": FILL_TO_TOP_N,
+    }
 
 
 @app.get("/health")
@@ -126,6 +176,8 @@ def health():
         "futures_enabled": FUTURES_ENABLED,
         "refresh_sec": REFRESH_SEC,
         "quote_allow": QUOTE_ALLOW,
+        "dedup_by_base": DEDUP_BY_BASE,
+        "fill_to_top_n": FILL_TO_TOP_N,
         "last_error": CACHE["last_error"],
     }
 
