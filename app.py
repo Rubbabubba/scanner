@@ -45,12 +45,17 @@ FALLBACK_MIN_24H_RANGE_PCT = float(os.getenv("FALLBACK_MIN_24H_RANGE_PCT", "0.02
 # Example: "CC,0G,HYPE"
 BASE_BLACKLIST = {b.strip().upper() for b in os.getenv("BASE_BLACKLIST", "").split(",") if b.strip()}
 
+# ✅ Majors floor (bases only, comma-separated)
+# Used only if we still haven't filled TOP_N after in_play + fallback.
+# Example: "BTC,ETH,SOL,LINK,ADA,DOT,AVAX,MATIC,LTC,XRP"
+MAJORS_FLOOR = [b.strip().upper() for b in os.getenv("MAJORS_FLOOR", "").split(",") if b.strip()]
+
 # Background loop behavior
 STARTUP_REFRESH = os.getenv("STARTUP_REFRESH", "1").strip().lower() in ("1", "true", "yes", "on")
 REFRESH_JITTER_SEC = int(os.getenv("REFRESH_JITTER_SEC", "5") or 5)  # small jitter so we don't align with other services
 
 
-app = FastAPI(title="Crypto Scanner", version="1.1.1")
+app = FastAPI(title="Crypto Scanner", version="1.2.0")
 
 _CACHE_LOCK = threading.Lock()
 CACHE: Dict[str, Any] = {
@@ -122,7 +127,6 @@ def _compute_scan() -> Dict[str, Any]:
     pairs = list_spot_pairs(quotes=QUOTE_ALLOW, limit=MAX_PAIRS)
 
     # ✅ Apply BASE_BLACKLIST BEFORE any scoring / tick fetch usage
-    # This ensures a blacklisted base can never appear in results, even if it scores high.
     pre_blacklist_count = len(pairs)
     removed_blacklist = 0
     if BASE_BLACKLIST:
@@ -150,13 +154,15 @@ def _compute_scan() -> Dict[str, Any]:
     in_play: List[Tuple[str, float, List[str], float, float]] = []
     fallback: List[Tuple[str, float, List[str], float, float]] = []
 
+    # Track the best scored pair per base across *all* scored pairs,
+    # so we can fill with MAJORS_FLOOR without relaxing thresholds.
+    best_any: Dict[str, Tuple[str, float, List[str], float, float]] = {}
+
     seen_pairs = 0
     spread_filtered = 0
     in_play_prefilter = 0
     fallback_prefilter = 0
 
-    # NOTE: Still somewhat heavy because of per-symbol OHLC/ATR.
-    # But now it runs in background, not in request.
     for sym in pairs:
         seen_pairs += 1
         t = tick.get(sym)
@@ -185,6 +191,16 @@ def _compute_scan() -> Dict[str, Any]:
 
         reasons = spot_reasons + bonus_reasons
 
+        # Save best pair for this base regardless of thresholds (for majors floor)
+        b = _base(sym)
+        prev = best_any.get(b)
+        if prev is None:
+            best_any[b] = (sym, total, reasons, usd_vol, rng)
+        else:
+            ps, pt, pr, pv, prng = prev
+            if total > pt or (total == pt and usd_vol > pv) or (total == pt and usd_vol == pv and rng > prng):
+                best_any[b] = (sym, total, reasons, usd_vol, rng)
+
         # Strict in-play
         if usd_vol >= MIN_24H_USD_VOL and rng >= MIN_24H_RANGE_PCT:
             in_play_prefilter += 1
@@ -212,6 +228,8 @@ def _compute_scan() -> Dict[str, Any]:
 
     top: List[Tuple[str, float, List[str], float, float]] = in_play[:TOP_N]
 
+    # Fill from fallback first (dynamic movers)
+    majors_added = 0
     if FILL_TO_TOP_N and len(top) < TOP_N:
         chosen_bases = {_base(s) for (s, _, _, _, _) in top}
         for item in fallback:
@@ -222,6 +240,23 @@ def _compute_scan() -> Dict[str, Any]:
                 continue
             top.append(item)
             chosen_bases.add(b)
+
+        # If still short, fill from MAJORS_FLOOR in order
+        if len(top) < TOP_N and MAJORS_FLOOR:
+            for b in MAJORS_FLOOR:
+                if len(top) >= TOP_N:
+                    break
+                if b in chosen_bases:
+                    continue
+                item = best_any.get(b)
+                if not item:
+                    continue
+                sym, total, reasons, vol, rng = item
+                # Add explicit reason marker for transparency
+                floor_reasons = list(reasons) + ["majors_floor"]
+                top.append((sym, float(total), floor_reasons, float(vol), float(rng)))
+                chosen_bases.add(b)
+                majors_added += 1
 
     active_symbols = [s for (s, _, _, _, _) in top]
     scores = {s: float(sc) for (s, sc, _, _, _) in top}
@@ -248,6 +283,8 @@ def _compute_scan() -> Dict[str, Any]:
             "in_play_scored_postdedup": post_in_play,
             "fallback_scored_postdedup": post_fallback,
             "returned": len(top),
+            "majors_floor_configured": len(MAJORS_FLOOR),
+            "majors_floor_added": majors_added,
             "dedup_by_base": DEDUP_BY_BASE,
             "fill_to_top_n": FILL_TO_TOP_N,
             "strict_thresholds": {
@@ -334,6 +371,8 @@ def health():
             "max_spread_pct": MAX_SPREAD_PCT,
             "base_blacklist_count": len(BASE_BLACKLIST),
             "base_blacklist_sample": sorted(list(BASE_BLACKLIST))[:20],
+            "majors_floor_count": len(MAJORS_FLOOR),
+            "majors_floor_sample": MAJORS_FLOOR[:20],
             "last_refresh_utc": CACHE.get("utc"),
             "last_error": CACHE.get("last_error"),
         }
