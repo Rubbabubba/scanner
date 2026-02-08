@@ -41,12 +41,16 @@ FILL_TO_TOP_N = os.getenv("FILL_TO_TOP_N", "1").strip().lower() in ("1", "true",
 FALLBACK_MIN_24H_USD_VOL = float(os.getenv("FALLBACK_MIN_24H_USD_VOL", "1000000") or 1000000)  # $1.0m
 FALLBACK_MIN_24H_RANGE_PCT = float(os.getenv("FALLBACK_MIN_24H_RANGE_PCT", "0.025") or 0.025)  # 2.5%
 
+# ✅ Blacklist (base assets only, comma-separated)
+# Example: "CC,0G,HYPE"
+BASE_BLACKLIST = {b.strip().upper() for b in os.getenv("BASE_BLACKLIST", "").split(",") if b.strip()}
+
 # Background loop behavior
 STARTUP_REFRESH = os.getenv("STARTUP_REFRESH", "1").strip().lower() in ("1", "true", "yes", "on")
 REFRESH_JITTER_SEC = int(os.getenv("REFRESH_JITTER_SEC", "5") or 5)  # small jitter so we don't align with other services
 
 
-app = FastAPI(title="Crypto Scanner", version="1.1.0")
+app = FastAPI(title="Crypto Scanner", version="1.1.1")
 
 _CACHE_LOCK = threading.Lock()
 CACHE: Dict[str, Any] = {
@@ -116,6 +120,24 @@ def _compute_scan() -> Dict[str, Any]:
     Heavy work: build in_play + fallback pools and return finalized cache payload.
     """
     pairs = list_spot_pairs(quotes=QUOTE_ALLOW, limit=MAX_PAIRS)
+
+    # ✅ Apply BASE_BLACKLIST BEFORE any scoring / tick fetch usage
+    # This ensures a blacklisted base can never appear in results, even if it scores high.
+    pre_blacklist_count = len(pairs)
+    removed_blacklist = 0
+    if BASE_BLACKLIST:
+        filtered_pairs: List[str] = []
+        for sym in pairs:
+            try:
+                b = _base(sym)
+            except Exception:
+                continue
+            if b in BASE_BLACKLIST:
+                removed_blacklist += 1
+                continue
+            filtered_pairs.append(sym)
+        pairs = filtered_pairs
+
     tick = ticker_24h(pairs)
 
     fut = None
@@ -215,6 +237,9 @@ def _compute_scan() -> Dict[str, Any]:
         "raw": {
             "universe": len(pairs),
             "seen_pairs": seen_pairs,
+            "pre_blacklist_pairs": pre_blacklist_count,
+            "removed_by_blacklist": removed_blacklist,
+            "base_blacklist": sorted(list(BASE_BLACKLIST))[:50],  # safety cap
             "spread_filtered": spread_filtered,
             "in_play_prefilter_count": in_play_prefilter,
             "fallback_prefilter_count": fallback_prefilter,
@@ -305,6 +330,10 @@ def health():
             "quote_allow": QUOTE_ALLOW,
             "dedup_by_base": DEDUP_BY_BASE,
             "fill_to_top_n": FILL_TO_TOP_N,
+            "max_pairs": MAX_PAIRS,
+            "max_spread_pct": MAX_SPREAD_PCT,
+            "base_blacklist_count": len(BASE_BLACKLIST),
+            "base_blacklist_sample": sorted(list(BASE_BLACKLIST))[:20],
             "last_refresh_utc": CACHE.get("utc"),
             "last_error": CACHE.get("last_error"),
         }
