@@ -59,6 +59,10 @@ def ticker_24h(symbols: List[str]) -> Dict[str, dict]:
         high = float(v["h"][1]) if len(v["h"]) > 1 else float(v["h"][0])
         low = float(v["l"][1]) if len(v["l"]) > 1 else float(v["l"][0])
         vol = float(v["v"][1]) if len(v["v"]) > 1 else float(v["v"][0])
+        bid = float(v["b"][0])
+        ask = float(v["a"][0])
+        mid = (bid + ask) / 2.0
+        spread_pct = (ask - bid) / mid if mid > 0 else None
 
         # quote detection
         quote = "USD"
@@ -87,6 +91,9 @@ def ticker_24h(symbols: List[str]) -> Dict[str, dict]:
             "vwap": vwap,
             "range_pct": rng_pct,
             "vol_usd": vol_usd,
+            "bid": bid,
+            "ask": ask,
+            "spread_pct": spread_pct,
         }
     return out
 

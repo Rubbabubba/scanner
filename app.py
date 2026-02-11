@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 # ✅ repo is flat (root-level imports)
-from kraken_spot import list_spot_pairs, ticker_24h, ohlc_close_series, best_bid_ask
-from scoring import compute_atr, score_spot, score_futures_bonus
+from kraken_spot import list_spot_pairs, ticker_24h
+from scoring import score_spot, score_futures_bonus
 
 FUTURES_ENABLED = os.getenv("FUTURES_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 if FUTURES_ENABLED:
@@ -41,6 +41,9 @@ FILL_TO_TOP_N = os.getenv("FILL_TO_TOP_N", "1").strip().lower() in ("1", "true",
 FALLBACK_MIN_24H_USD_VOL = float(os.getenv("FALLBACK_MIN_24H_USD_VOL", "1000000") or 1000000)  # $1.0m
 FALLBACK_MIN_24H_RANGE_PCT = float(os.getenv("FALLBACK_MIN_24H_RANGE_PCT", "0.025") or 0.025)  # 2.5%
 
+# ATR-active proxy (we avoid per-symbol OHLC calls for reliability)
+ATR_ACTIVE_MIN_RANGE_PCT = float(os.getenv("ATR_ACTIVE_MIN_RANGE_PCT", "0.02") or 0.02)  # 2%
+
 # ✅ Blacklist (base assets only, comma-separated)
 # Example: "CC,0G,HYPE"
 BASE_BLACKLIST = {b.strip().upper() for b in os.getenv("BASE_BLACKLIST", "").split(",") if b.strip()}
@@ -55,7 +58,7 @@ STARTUP_REFRESH = os.getenv("STARTUP_REFRESH", "1").strip().lower() in ("1", "tr
 REFRESH_JITTER_SEC = int(os.getenv("REFRESH_JITTER_SEC", "5") or 5)  # small jitter so we don't align with other services
 
 
-app = FastAPI(title="Crypto Scanner", version="1.2.0")
+app = FastAPI(title="Crypto Scanner", version="1.3.0")
 
 _CACHE_LOCK = threading.Lock()
 CACHE: Dict[str, Any] = {
@@ -77,23 +80,6 @@ def _base(sym: str) -> str:
     return sym.split("/", 1)[0].upper()
 
 
-def _spread_ok(sym: str) -> Tuple[bool, float | None]:
-    """
-    Returns (ok, spread_pct_or_none).
-    If book call fails, allow the symbol (spread unknown).
-    """
-    try:
-        bid, ask = best_bid_ask(sym)
-        mid = (bid + ask) / 2.0
-        spread_pct = (ask - bid) / mid if mid > 0 else 1.0
-        return (spread_pct <= MAX_SPREAD_PCT), spread_pct
-    except Exception:
-        return True, None
-
-
-def _atr_for(sym: str) -> float:
-    closes = ohlc_close_series(sym, interval_min=15, bars=80)
-    return compute_atr(closes, period=14)
 
 
 def _dedup(pool: List[Tuple[str, float, List[str], float, float]]) -> List[Tuple[str, float, List[str], float, float]]:
@@ -172,13 +158,15 @@ def _compute_scan() -> Dict[str, Any]:
         usd_vol = float(t["vol_usd"])
         rng = float(t["range_pct"])
 
-        ok_spread, spread_pct = _spread_ok(sym)
-        if not ok_spread:
+        spread_pct = t.get("spread_pct")
+        # Spread filter (from ticker; no extra REST calls)
+        if spread_pct is not None and float(spread_pct) > MAX_SPREAD_PCT:
             spread_filtered += 1
             continue
 
-        atr = _atr_for(sym)
-        spot_score, spot_reasons = score_spot(t, atr=atr, spread_pct=spread_pct)
+        # ATR-active proxy: treat as "active" if 24h range is at least a small floor
+        atr_proxy = 1.0 if float(rng) >= ATR_ACTIVE_MIN_RANGE_PCT else 0.0
+        spot_score, spot_reasons = score_spot(t, atr=atr_proxy, spread_pct=spread_pct)
 
         bonus = 0.0
         bonus_reasons: List[str] = []
@@ -380,26 +368,26 @@ def health():
 
 @app.get("/active_coins")
 def active_coins():
-    # Return cache immediately; do NOT compute here.
+    """
+    Return cache immediately. Never run a full scan in the request path.
+    On cold start, return ok=False + warming_up until background refresh populates CACHE.
+    """
     with _CACHE_LOCK:
-        # If we haven't refreshed yet, try once (fast fail-safe)
         if CACHE.get("ts") is None:
-            try:
-                data = _compute_scan()
-                CACHE.update(data)
-            except Exception as e:
-                CACHE["ts"] = time.time()
-                CACHE["utc"] = utc_now_iso()
-                CACHE["last_error"] = str(e)
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "ok": False,
-                        "utc": utc_now_iso(),
-                        "error": str(e),
-                        "active_symbols": CACHE.get("active_symbols", []),
-                    },
-                )
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "ok": False,
+                    "utc": utc_now_iso(),
+                    "status": "warming_up",
+                    "refresh_sec": REFRESH_SEC,
+                    "quote_allow": QUOTE_ALLOW,
+                    "futures_enabled": FUTURES_ENABLED,
+                    "last_error": CACHE.get("last_error"),
+                    "last_refresh_utc": CACHE.get("utc"),
+                    "active_symbols": [],
+                },
+            )
 
         return {
             "ok": True,
