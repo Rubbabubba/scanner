@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
+import requests
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -56,6 +58,10 @@ MAJORS_FLOOR = [b.strip().upper() for b in os.getenv("MAJORS_FLOOR", "").split("
 # Background loop behavior
 STARTUP_REFRESH = os.getenv("STARTUP_REFRESH", "1").strip().lower() in ("1", "true", "yes", "on")
 REFRESH_JITTER_SEC = int(os.getenv("REFRESH_JITTER_SEC", "5") or 5)  # small jitter so we don't align with other services
+SCANNER_COORDINATION_URL = os.getenv("SCANNER_COORDINATION_URL", "").strip()
+SCANNER_COORDINATION_TIMEOUT_SEC = float(os.getenv("SCANNER_COORDINATION_TIMEOUT_SEC", "3.0") or 3.0)
+SCANNER_COORDINATION_LOOKBACK_SEC = int(os.getenv("SCANNER_COORDINATION_LOOKBACK_SEC", "900") or 900)
+SCANNER_SYMBOL_HOLDOFF_SEC = int(os.getenv("SCANNER_SYMBOL_HOLDOFF_SEC", "0") or 0)
 
 
 app = FastAPI(title="Crypto Scanner", version="1.3.0")
@@ -70,6 +76,9 @@ CACHE: Dict[str, Any] = {
     "last_error": None,
     "raw": None,
 }
+
+_EMIT_HISTORY: Dict[str, float] = {}
+_EMIT_LOCK = threading.Lock()
 
 
 def utc_now_iso() -> str:
@@ -105,6 +114,78 @@ def _sort_key(x: Tuple[str, float, List[str], float, float]):
     # score, volume, range
     return (x[1], x[3], x[4])
 
+
+
+
+def _fetch_coordination_state() -> Dict[str, Any]:
+    if not SCANNER_COORDINATION_URL:
+        return {"ok": False, "reason": "missing_coordination_url", "suppressed_symbols": []}
+    try:
+        r = requests.get(
+            SCANNER_COORDINATION_URL,
+            params={"lookback_sec": SCANNER_COORDINATION_LOOKBACK_SEC, "limit": max(25, TOP_N * 5)},
+            timeout=SCANNER_COORDINATION_TIMEOUT_SEC,
+        )
+        r.raise_for_status()
+        data = r.json() if r.content else {}
+        coord = data.get("coordination") if isinstance(data, dict) else {}
+        suppressed_symbols = coord.get("suppressed_symbols") or []
+        clean = []
+        seen = set()
+        for sym in suppressed_symbols:
+            s = str(sym or "").strip().upper()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            clean.append(s)
+        return {
+            "ok": bool(data.get("ok", True)),
+            "reason": None,
+            "suppressed_symbols": clean,
+            "active_workflow_locks": coord.get("active_workflow_locks") or [],
+            "recent_admission_passed": coord.get("recent_admission_passed") or [],
+            "active_signal_fingerprints": coord.get("active_signal_fingerprints") or [],
+        }
+    except Exception as e:
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}", "suppressed_symbols": []}
+
+
+def _apply_scanner_symbol_holdoff(symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
+    if SCANNER_SYMBOL_HOLDOFF_SEC <= 0:
+        return symbols, {"holdoff_sec": 0, "suppressed_symbols": [], "active_symbol_count": len(symbols)}
+    now = time.time()
+    out: List[str] = []
+    suppressed: List[str] = []
+    with _EMIT_LOCK:
+        expired = [sym for sym, ts in _EMIT_HISTORY.items() if (now - float(ts)) >= float(SCANNER_SYMBOL_HOLDOFF_SEC)]
+        for sym in expired:
+            _EMIT_HISTORY.pop(sym, None)
+        for sym in symbols:
+            last_ts = float(_EMIT_HISTORY.get(sym) or 0.0)
+            if last_ts and (now - last_ts) < float(SCANNER_SYMBOL_HOLDOFF_SEC):
+                suppressed.append(sym)
+                continue
+            out.append(sym)
+            _EMIT_HISTORY[sym] = now
+    return out, {
+        "holdoff_sec": SCANNER_SYMBOL_HOLDOFF_SEC,
+        "suppressed_symbols": suppressed,
+        "active_symbol_count": len(out),
+    }
+
+
+def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], float, float]], suppressed_symbols: set[str]) -> tuple[List[Tuple[str, float, List[str], float, float]], Dict[str, Any]]:
+    if not suppressed_symbols:
+        return pool, {"suppressed_symbols": [], "remaining": len(pool)}
+    kept: List[Tuple[str, float, List[str], float, float]] = []
+    suppressed: List[str] = []
+    for item in pool:
+        sym = str(item[0] or '').upper()
+        if sym in suppressed_symbols:
+            suppressed.append(sym)
+            continue
+        kept.append(item)
+    return kept, {"suppressed_symbols": suppressed, "remaining": len(kept)}
 
 def _compute_scan() -> Dict[str, Any]:
     """
@@ -246,9 +327,31 @@ def _compute_scan() -> Dict[str, Any]:
                 chosen_bases.add(b)
                 majors_added += 1
 
-    active_symbols = [s for (s, _, _, _, _) in top]
-    scores = {s: float(sc) for (s, sc, _, _, _) in top}
-    reasons = {s: rs for (s, _, rs, _, _) in top}
+    coordination = _fetch_coordination_state()
+    coordination_suppressed = set(str(s or '').strip().upper() for s in (coordination.get('suppressed_symbols') or []))
+    filtered_top, coordination_meta = _apply_coordination_suppression(top, coordination_suppressed)
+
+    if FILL_TO_TOP_N and len(filtered_top) < TOP_N:
+        chosen = {_base(s) for (s, _, _, _, _) in filtered_top}
+        existing = {str(s or '').upper() for (s, _, _, _, _) in filtered_top}
+        for item in (in_play + fallback):
+            if len(filtered_top) >= TOP_N:
+                break
+            sym = str(item[0] or '').upper()
+            if sym in coordination_suppressed or sym in existing:
+                continue
+            b = _base(sym)
+            if b in chosen:
+                continue
+            filtered_top.append(item)
+            chosen.add(b)
+            existing.add(sym)
+
+    active_symbols = [s for (s, _, _, _, _) in filtered_top]
+    active_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(active_symbols)
+    top_by_symbol = {str(s): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
+    scores = {s: float(top_by_symbol[s][0]) for s in active_symbols if s in top_by_symbol}
+    reasons = {s: top_by_symbol[s][1] for s in active_symbols if s in top_by_symbol}
 
     return {
         "ts": time.time(),
@@ -284,6 +387,16 @@ def _compute_scan() -> Dict[str, Any]:
                 "min_24h_range_pct": FALLBACK_MIN_24H_RANGE_PCT,
             },
             "spread_max_pct": MAX_SPREAD_PCT,
+            "coordination": {
+                "enabled": bool(SCANNER_COORDINATION_URL),
+                "ok": bool(coordination.get("ok")),
+                "reason": coordination.get("reason"),
+                "suppressed_symbols": coordination_meta.get("suppressed_symbols") or [],
+                "active_workflow_locks": len(coordination.get("active_workflow_locks") or []),
+                "recent_admission_passed": len(coordination.get("recent_admission_passed") or []),
+                "active_signal_fingerprints": len(coordination.get("active_signal_fingerprints") or []),
+            },
+            "scanner_symbol_holdoff": holdoff_meta,
         },
     }
 
@@ -363,6 +476,8 @@ def health():
             "majors_floor_sample": MAJORS_FLOOR[:20],
             "last_refresh_utc": CACHE.get("utc"),
             "last_error": CACHE.get("last_error"),
+            "scanner_coordination_url": SCANNER_COORDINATION_URL or None,
+            "scanner_symbol_holdoff_sec": SCANNER_SYMBOL_HOLDOFF_SEC,
         }
 
 
