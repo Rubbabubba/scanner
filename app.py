@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
+from collections import defaultdict
 
 import requests
 
@@ -62,9 +63,12 @@ SCANNER_COORDINATION_URL = os.getenv("SCANNER_COORDINATION_URL", "").strip()
 SCANNER_COORDINATION_TIMEOUT_SEC = float(os.getenv("SCANNER_COORDINATION_TIMEOUT_SEC", "3.0") or 3.0)
 SCANNER_COORDINATION_LOOKBACK_SEC = int(os.getenv("SCANNER_COORDINATION_LOOKBACK_SEC", "900") or 900)
 SCANNER_SYMBOL_HOLDOFF_SEC = int(os.getenv("SCANNER_SYMBOL_HOLDOFF_SEC", "0") or 0)
+SCANNER_FINGERPRINT_TTL_SEC = int(os.getenv("SCANNER_FINGERPRINT_TTL_SEC", str(max(900, SCANNER_COORDINATION_LOOKBACK_SEC or 900))) or max(900, SCANNER_COORDINATION_LOOKBACK_SEC or 900))
+SCANNER_BAR_LOCK_SEC = int(os.getenv("SCANNER_BAR_LOCK_SEC", str(max(60, REFRESH_SEC))) or max(60, REFRESH_SEC))
+SCANNER_INFLIGHT_HOLDOFF_SEC = int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str(max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))) or max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))
 
 
-app = FastAPI(title="Crypto Scanner", version="1.3.0")
+app = FastAPI(title="Crypto Scanner", version="1.4.0")
 
 _CACHE_LOCK = threading.Lock()
 CACHE: Dict[str, Any] = {
@@ -78,7 +82,17 @@ CACHE: Dict[str, Any] = {
 }
 
 _EMIT_HISTORY: Dict[str, float] = {}
+_EMIT_FINGERPRINTS: Dict[str, float] = {}
+_EMIT_BAR_LOCKS: Dict[str, float] = {}
 _EMIT_LOCK = threading.Lock()
+_SUPPRESSION_STATS: Dict[str, Any] = {
+    "last_refresh_utc": None,
+    "last_refresh_ts": None,
+    "last_refresh_counts": {},
+    "cumulative_counts": defaultdict(int),
+    "recent_suppressed_symbols": {},
+    "recent_emitted_symbols": [],
+}
 
 
 def utc_now_iso() -> str:
@@ -89,6 +103,49 @@ def _base(sym: str) -> str:
     return sym.split("/", 1)[0].upper()
 
 
+def _now_ts() -> float:
+    return time.time()
+
+
+def _bar_bucket(ts: float) -> int:
+    width = max(60, int(SCANNER_BAR_LOCK_SEC or REFRESH_SEC or 300))
+    return int(ts // width) * width
+
+
+def _scanner_symbol_fingerprint(symbol: str, ts: float | None = None) -> str:
+    now = float(ts or _now_ts())
+    return f"{str(symbol or '').upper()}|bar:{_bar_bucket(now)}"
+
+
+def _record_refresh_stats(counts: Dict[str, int], suppressed_symbols: Dict[str, List[str]], emitted_symbols: List[str]) -> None:
+    now_iso = utc_now_iso()
+    with _EMIT_LOCK:
+        _SUPPRESSION_STATS["last_refresh_utc"] = now_iso
+        _SUPPRESSION_STATS["last_refresh_ts"] = _now_ts()
+        _SUPPRESSION_STATS["last_refresh_counts"] = dict(counts)
+        cc = _SUPPRESSION_STATS.setdefault("cumulative_counts", defaultdict(int))
+        for k, v in counts.items():
+            cc[k] += int(v or 0)
+        recent = _SUPPRESSION_STATS.setdefault("recent_suppressed_symbols", {})
+        for reason, syms in suppressed_symbols.items():
+            if syms:
+                recent[reason] = list(syms)[-50:]
+        _SUPPRESSION_STATS["recent_emitted_symbols"] = list(emitted_symbols)[-50:]
+
+
+def _suppression_snapshot() -> Dict[str, Any]:
+    with _EMIT_LOCK:
+        return {
+            "last_refresh_utc": _SUPPRESSION_STATS.get("last_refresh_utc"),
+            "last_refresh_ts": _SUPPRESSION_STATS.get("last_refresh_ts"),
+            "last_refresh_counts": dict(_SUPPRESSION_STATS.get("last_refresh_counts") or {}),
+            "cumulative_counts": dict(_SUPPRESSION_STATS.get("cumulative_counts") or {}),
+            "recent_suppressed_symbols": dict(_SUPPRESSION_STATS.get("recent_suppressed_symbols") or {}),
+            "recent_emitted_symbols": list(_SUPPRESSION_STATS.get("recent_emitted_symbols") or []),
+            "active_emit_history": len(_EMIT_HISTORY),
+            "active_emit_fingerprints": len(_EMIT_FINGERPRINTS),
+            "active_bar_locks": len(_EMIT_BAR_LOCKS),
+        }
 
 
 def _dedup(pool: List[Tuple[str, float, List[str], float, float]]) -> List[Tuple[str, float, List[str], float, float]]:
@@ -117,9 +174,26 @@ def _sort_key(x: Tuple[str, float, List[str], float, float]):
 
 
 
+def _extract_symbols_from_objects(items: List[Any]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in items or []:
+        sym = None
+        if isinstance(item, dict):
+            sym = item.get("symbol") or item.get("symbol_id") or item.get("pair")
+        elif isinstance(item, str):
+            sym = item
+        s = str(sym or "").strip().upper()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
 def _fetch_coordination_state() -> Dict[str, Any]:
     if not SCANNER_COORDINATION_URL:
-        return {"ok": False, "reason": "missing_coordination_url", "suppressed_symbols": []}
+        return {"ok": False, "reason": "missing_coordination_url", "suppressed_symbols": [], "hard_suppressed_symbols": []}
     try:
         r = requests.get(
             SCANNER_COORDINATION_URL,
@@ -138,37 +212,45 @@ def _fetch_coordination_state() -> Dict[str, Any]:
                 continue
             seen.add(s)
             clean.append(s)
+        active_workflow_locks = coord.get("active_workflow_locks") or []
+        recent_admission_passed = coord.get("recent_admission_passed") or []
+        active_signal_fingerprints = coord.get("active_signal_fingerprints") or []
+        hard = set(clean)
+        hard.update(_extract_symbols_from_objects(active_workflow_locks))
+        hard.update(_extract_symbols_from_objects(recent_admission_passed))
+        hard.update(_extract_symbols_from_objects(active_signal_fingerprints))
         return {
             "ok": bool(data.get("ok", True)),
             "reason": None,
             "suppressed_symbols": clean,
-            "active_workflow_locks": coord.get("active_workflow_locks") or [],
-            "recent_admission_passed": coord.get("recent_admission_passed") or [],
-            "active_signal_fingerprints": coord.get("active_signal_fingerprints") or [],
+            "hard_suppressed_symbols": sorted(hard),
+            "active_workflow_locks": active_workflow_locks,
+            "recent_admission_passed": recent_admission_passed,
+            "active_signal_fingerprints": active_signal_fingerprints,
         }
     except Exception as e:
-        return {"ok": False, "reason": f"{type(e).__name__}: {e}", "suppressed_symbols": []}
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}", "suppressed_symbols": [], "hard_suppressed_symbols": []}
 
 
 def _apply_scanner_symbol_holdoff(symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
-    if SCANNER_SYMBOL_HOLDOFF_SEC <= 0:
+    holdoff_sec = max(0, int(SCANNER_INFLIGHT_HOLDOFF_SEC or SCANNER_SYMBOL_HOLDOFF_SEC or 0))
+    if holdoff_sec <= 0:
         return symbols, {"holdoff_sec": 0, "suppressed_symbols": [], "active_symbol_count": len(symbols)}
-    now = time.time()
+    now = _now_ts()
     out: List[str] = []
     suppressed: List[str] = []
     with _EMIT_LOCK:
-        expired = [sym for sym, ts in _EMIT_HISTORY.items() if (now - float(ts)) >= float(SCANNER_SYMBOL_HOLDOFF_SEC)]
+        expired = [sym for sym, ts in _EMIT_HISTORY.items() if (now - float(ts)) >= float(holdoff_sec)]
         for sym in expired:
             _EMIT_HISTORY.pop(sym, None)
         for sym in symbols:
             last_ts = float(_EMIT_HISTORY.get(sym) or 0.0)
-            if last_ts and (now - last_ts) < float(SCANNER_SYMBOL_HOLDOFF_SEC):
+            if last_ts and (now - last_ts) < float(holdoff_sec):
                 suppressed.append(sym)
                 continue
             out.append(sym)
-            _EMIT_HISTORY[sym] = now
     return out, {
-        "holdoff_sec": SCANNER_SYMBOL_HOLDOFF_SEC,
+        "holdoff_sec": holdoff_sec,
         "suppressed_symbols": suppressed,
         "active_symbol_count": len(out),
     }
@@ -186,6 +268,41 @@ def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], floa
             continue
         kept.append(item)
     return kept, {"suppressed_symbols": suppressed, "remaining": len(kept)}
+
+def _apply_scanner_emission_controls(symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
+    now = _now_ts()
+    ttl_sec = max(60, int(SCANNER_FINGERPRINT_TTL_SEC or 900))
+    bar_lock_sec = max(60, int(SCANNER_BAR_LOCK_SEC or REFRESH_SEC or 300))
+    emitted: List[str] = []
+    duplicate_suppressed: List[str] = []
+    bar_lock_suppressed: List[str] = []
+    with _EMIT_LOCK:
+        expired_fp = [fp for fp, ts in _EMIT_FINGERPRINTS.items() if (now - float(ts)) >= float(ttl_sec)]
+        for fp in expired_fp:
+            _EMIT_FINGERPRINTS.pop(fp, None)
+        expired_bar = [k for k, ts in _EMIT_BAR_LOCKS.items() if (now - float(ts)) >= float(bar_lock_sec)]
+        for k in expired_bar:
+            _EMIT_BAR_LOCKS.pop(k, None)
+        for sym in symbols:
+            fp = _scanner_symbol_fingerprint(sym, now)
+            bar_key = f"{str(sym or '').upper()}|bar:{_bar_bucket(now)}"
+            if fp in _EMIT_FINGERPRINTS:
+                duplicate_suppressed.append(sym)
+                continue
+            if bar_key in _EMIT_BAR_LOCKS:
+                bar_lock_suppressed.append(sym)
+                continue
+            emitted.append(sym)
+            _EMIT_FINGERPRINTS[fp] = now
+            _EMIT_BAR_LOCKS[bar_key] = now
+            _EMIT_HISTORY[str(sym or '').upper()] = now
+    return emitted, {
+        "fingerprint_ttl_sec": ttl_sec,
+        "bar_lock_sec": bar_lock_sec,
+        "suppressed_duplicate": duplicate_suppressed,
+        "suppressed_bar_lock": bar_lock_suppressed,
+        "emitted_symbols": emitted,
+    }
 
 def _compute_scan() -> Dict[str, Any]:
     """
@@ -328,7 +445,7 @@ def _compute_scan() -> Dict[str, Any]:
                 majors_added += 1
 
     coordination = _fetch_coordination_state()
-    coordination_suppressed = set(str(s or '').strip().upper() for s in (coordination.get('suppressed_symbols') or []))
+    coordination_suppressed = set(str(s or '').strip().upper() for s in (coordination.get('hard_suppressed_symbols') or coordination.get('suppressed_symbols') or []))
     filtered_top, coordination_meta = _apply_coordination_suppression(top, coordination_suppressed)
 
     if FILL_TO_TOP_N and len(filtered_top) < TOP_N:
@@ -347,11 +464,27 @@ def _compute_scan() -> Dict[str, Any]:
             chosen.add(b)
             existing.add(sym)
 
-    active_symbols = [s for (s, _, _, _, _) in filtered_top]
-    active_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(active_symbols)
-    top_by_symbol = {str(s): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
+    candidate_symbols = [str(s or '').upper() for (s, _, _, _, _) in filtered_top]
+    candidate_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(candidate_symbols)
+    active_symbols, emission_meta = _apply_scanner_emission_controls(candidate_symbols)
+    top_by_symbol = {str(s).upper(): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
     scores = {s: float(top_by_symbol[s][0]) for s in active_symbols if s in top_by_symbol}
     reasons = {s: top_by_symbol[s][1] for s in active_symbols if s in top_by_symbol}
+
+    refresh_counts = {
+        "scanner_candidates": len(top),
+        "scanner_coordination_suppressed": len(coordination_meta.get("suppressed_symbols") or []),
+        "scanner_holdoff_suppressed": len(holdoff_meta.get("suppressed_symbols") or []),
+        "scanner_suppressed_duplicate": len(emission_meta.get("suppressed_duplicate") or []),
+        "scanner_suppressed_bar_lock": len(emission_meta.get("suppressed_bar_lock") or []),
+        "scanner_emitted": len(active_symbols),
+    }
+    _record_refresh_stats(refresh_counts, {
+        "coordination": coordination_meta.get("suppressed_symbols") or [],
+        "holdoff": holdoff_meta.get("suppressed_symbols") or [],
+        "duplicate": emission_meta.get("suppressed_duplicate") or [],
+        "bar_lock": emission_meta.get("suppressed_bar_lock") or [],
+    }, active_symbols)
 
     return {
         "ts": time.time(),
@@ -392,11 +525,14 @@ def _compute_scan() -> Dict[str, Any]:
                 "ok": bool(coordination.get("ok")),
                 "reason": coordination.get("reason"),
                 "suppressed_symbols": coordination_meta.get("suppressed_symbols") or [],
+                "hard_suppressed_symbols": coordination.get("hard_suppressed_symbols") or [],
                 "active_workflow_locks": len(coordination.get("active_workflow_locks") or []),
                 "recent_admission_passed": len(coordination.get("recent_admission_passed") or []),
                 "active_signal_fingerprints": len(coordination.get("active_signal_fingerprints") or []),
             },
             "scanner_symbol_holdoff": holdoff_meta,
+            "scanner_emission_controls": emission_meta,
+            "scanner_telemetry": _suppression_snapshot(),
         },
     }
 
@@ -478,6 +614,28 @@ def health():
             "last_error": CACHE.get("last_error"),
             "scanner_coordination_url": SCANNER_COORDINATION_URL or None,
             "scanner_symbol_holdoff_sec": SCANNER_SYMBOL_HOLDOFF_SEC,
+            "scanner_fingerprint_ttl_sec": SCANNER_FINGERPRINT_TTL_SEC,
+            "scanner_bar_lock_sec": SCANNER_BAR_LOCK_SEC,
+            "scanner_inflight_holdoff_sec": SCANNER_INFLIGHT_HOLDOFF_SEC,
+            "scanner_telemetry": _suppression_snapshot(),
+        }
+
+
+
+
+@app.get("/diagnostics/scanner_suppression")
+def diagnostics_scanner_suppression():
+    with _CACHE_LOCK:
+        return {
+            "ok": True,
+            "utc": utc_now_iso(),
+            "scanner_fingerprint_ttl_sec": SCANNER_FINGERPRINT_TTL_SEC,
+            "scanner_bar_lock_sec": SCANNER_BAR_LOCK_SEC,
+            "scanner_inflight_holdoff_sec": SCANNER_INFLIGHT_HOLDOFF_SEC,
+            "scanner_symbol_holdoff_sec": SCANNER_SYMBOL_HOLDOFF_SEC,
+            "telemetry": _suppression_snapshot(),
+            "last_refresh_utc": CACHE.get("utc"),
+            "last_meta": (CACHE.get("raw") or {}),
         }
 
 
