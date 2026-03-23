@@ -12,6 +12,8 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from build_info import build_payload
+
 # ✅ repo is flat (root-level imports)
 from kraken_spot import list_spot_pairs, ticker_24h
 from scoring import score_spot, score_futures_bonus
@@ -69,6 +71,8 @@ SCANNER_INFLIGHT_HOLDOFF_SEC = int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str
 
 
 app = FastAPI(title="Crypto Scanner", version="1.4.0")
+
+PATCH_BUILD = build_payload()
 
 _CACHE_LOCK = threading.Lock()
 CACHE: Dict[str, Any] = {
@@ -587,6 +591,7 @@ def root():
         return {
             "ok": True,
             "service": "crypto-scanner",
+            "build": PATCH_BUILD,
             "utc": utc_now_iso(),
             "last_refresh_utc": CACHE.get("utc"),
             "active_count": len(CACHE.get("active_symbols") or []),
@@ -599,6 +604,7 @@ def health():
         return {
             "ok": True,
             "utc": utc_now_iso(),
+            "build": PATCH_BUILD,
             "futures_enabled": FUTURES_ENABLED,
             "refresh_sec": REFRESH_SEC,
             "quote_allow": QUOTE_ALLOW,
@@ -636,6 +642,74 @@ def diagnostics_scanner_suppression():
             "telemetry": _suppression_snapshot(),
             "last_refresh_utc": CACHE.get("utc"),
             "last_meta": (CACHE.get("raw") or {}),
+        }
+
+
+@app.get("/build")
+def build_info_endpoint():
+    return {**PATCH_BUILD}
+
+
+@app.get("/runtime")
+def runtime_endpoint():
+    with _CACHE_LOCK:
+        return {
+            "ok": True,
+            "utc": utc_now_iso(),
+            "build": PATCH_BUILD,
+            "service": {
+                "name": PATCH_BUILD.get("system_name"),
+                "role": PATCH_BUILD.get("service_role"),
+                "env_name": PATCH_BUILD.get("env_name"),
+                "release_stage": PATCH_BUILD.get("release_stage_configured"),
+            },
+            "runtime": {
+                "futures_enabled": FUTURES_ENABLED,
+                "refresh_sec": REFRESH_SEC,
+                "top_n": TOP_N,
+                "quote_allow": QUOTE_ALLOW,
+                "max_pairs": MAX_PAIRS,
+                "max_spread_pct": MAX_SPREAD_PCT,
+                "base_blacklist_count": len(BASE_BLACKLIST),
+                "majors_floor_count": len(MAJORS_FLOOR),
+                "scanner_coordination_url": SCANNER_COORDINATION_URL or None,
+                "last_refresh_utc": CACHE.get("utc"),
+                "last_error": CACHE.get("last_error"),
+                "active_count": len(CACHE.get("active_symbols") or []),
+                "active_symbols": CACHE.get("active_symbols") or [],
+                "telemetry": _suppression_snapshot(),
+            },
+        }
+
+
+@app.get("/ready")
+def ready_endpoint():
+    with _CACHE_LOCK:
+        issues = []
+        cache_warm = CACHE.get("ts") is not None
+        if not cache_warm:
+            issues.append("scanner_cache_cold")
+        if CACHE.get("last_error"):
+            issues.append("scanner_last_error_present")
+        if not QUOTE_ALLOW:
+            issues.append("quote_allow_empty")
+        ready = len(issues) == 0
+        return {
+            "ok": True,
+            "ready": ready,
+            "utc": utc_now_iso(),
+            "build": PATCH_BUILD,
+            "service": {
+                "name": PATCH_BUILD.get("system_name"),
+                "role": PATCH_BUILD.get("service_role"),
+                "env_name": PATCH_BUILD.get("env_name"),
+                "release_stage": PATCH_BUILD.get("release_stage_configured"),
+            },
+            "issues": issues,
+            "cache_warm": cache_warm,
+            "last_refresh_utc": CACHE.get("utc"),
+            "last_error": CACHE.get("last_error"),
+            "active_count": len(CACHE.get("active_symbols") or []),
         }
 
 
