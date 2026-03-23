@@ -1,3 +1,4 @@
-# Patch 002
-
-Adds scanner contract endpoint and embeds contract metadata in scanner outputs.
+Patch 002A
+- Preserve scanner contract endpoints
+- Add /compatibility and embed compatibility in active_coins/runtime/ready
+- Align build metadata to corrective patch
