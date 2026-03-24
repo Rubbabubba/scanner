@@ -1,4 +1,1 @@
-Patch 002A
-- Preserve scanner contract endpoints
-- Add /compatibility and embed compatibility in active_coins/runtime/ready
-- Align build metadata to corrective patch
+Patch 002B: scanner compatibility endpoint hardening. Uses reentrant cache lock and exposes compatibility without deadlock. Drop-in patch built on Patch 001 baseline.

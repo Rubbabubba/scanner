@@ -74,7 +74,7 @@ app = FastAPI(title="Crypto Scanner", version="1.4.0")
 
 PATCH_BUILD = build_payload()
 
-_CACHE_LOCK = threading.Lock()
+_CACHE_LOCK = threading.RLock()
 CACHE: Dict[str, Any] = {
     "ts": None,              # epoch seconds
     "utc": None,             # ISO timestamp of last refresh
@@ -575,38 +575,40 @@ def _refresh_forever() -> None:
                 CACHE["last_error"] = str(e)
 
 
+def _scanner_compatibility_snapshot_unlocked() -> Dict[str, Any]:
+    active_symbols = list(CACHE.get("active_symbols") or [])
+    return {
+        "mode": "ranked_multi_symbol_scanner",
+        "supports_multi_symbol": True,
+        "quote_allow": list(QUOTE_ALLOW),
+        "futures_enabled": bool(FUTURES_ENABLED),
+        "refresh_sec": int(REFRESH_SEC),
+        "top_n": int(TOP_N),
+        "max_pairs": int(MAX_PAIRS),
+        "max_spread_pct": float(MAX_SPREAD_PCT),
+        "scanner_symbol_holdoff_sec": int(SCANNER_SYMBOL_HOLDOFF_SEC),
+        "scanner_inflight_holdoff_sec": int(SCANNER_INFLIGHT_HOLDOFF_SEC),
+        "scanner_bar_lock_sec": int(SCANNER_BAR_LOCK_SEC),
+        "scanner_fingerprint_ttl_sec": int(SCANNER_FINGERPRINT_TTL_SEC),
+        "coordination_url_configured": bool(SCANNER_COORDINATION_URL),
+        "cache_warm": CACHE.get("ts") is not None,
+        "active_count": len(active_symbols),
+        "active_symbols_sample": active_symbols[:12],
+        "active_symbols_truncated": len(active_symbols) > 12,
+        "last_refresh_utc": CACHE.get("utc"),
+        "last_error": CACHE.get("last_error"),
+        "fee_churn_guardrails": {
+            "emission_controls_active": True,
+            "symbol_holdoff_active": int(SCANNER_INFLIGHT_HOLDOFF_SEC) > 0 or int(SCANNER_SYMBOL_HOLDOFF_SEC) > 0,
+            "bar_lock_active": int(SCANNER_BAR_LOCK_SEC) > 0,
+            "fingerprint_ttl_active": int(SCANNER_FINGERPRINT_TTL_SEC) > 0,
+        },
+    }
 
 
 def _scanner_compatibility_snapshot() -> Dict[str, Any]:
     with _CACHE_LOCK:
-        active_symbols = list(CACHE.get("active_symbols") or [])
-        return {
-            "mode": "ranked_multi_symbol_scanner",
-            "supports_multi_symbol": True,
-            "quote_allow": list(QUOTE_ALLOW),
-            "futures_enabled": bool(FUTURES_ENABLED),
-            "refresh_sec": int(REFRESH_SEC),
-            "top_n": int(TOP_N),
-            "max_pairs": int(MAX_PAIRS),
-            "max_spread_pct": float(MAX_SPREAD_PCT),
-            "scanner_symbol_holdoff_sec": int(SCANNER_SYMBOL_HOLDOFF_SEC),
-            "scanner_inflight_holdoff_sec": int(SCANNER_INFLIGHT_HOLDOFF_SEC),
-            "scanner_bar_lock_sec": int(SCANNER_BAR_LOCK_SEC),
-            "scanner_fingerprint_ttl_sec": int(SCANNER_FINGERPRINT_TTL_SEC),
-            "coordination_url_configured": bool(SCANNER_COORDINATION_URL),
-            "cache_warm": CACHE.get("ts") is not None,
-            "active_count": len(active_symbols),
-            "active_symbols_sample": active_symbols[:12],
-            "active_symbols_truncated": len(active_symbols) > 12,
-            "last_refresh_utc": CACHE.get("utc"),
-            "last_error": CACHE.get("last_error"),
-            "fee_churn_guardrails": {
-                "emission_controls_active": True,
-                "symbol_holdoff_active": int(SCANNER_INFLIGHT_HOLDOFF_SEC) > 0 or int(SCANNER_SYMBOL_HOLDOFF_SEC) > 0,
-                "bar_lock_active": int(SCANNER_BAR_LOCK_SEC) > 0,
-                "fingerprint_ttl_active": int(SCANNER_FINGERPRINT_TTL_SEC) > 0,
-            },
-        }
+        return _scanner_compatibility_snapshot_unlocked()
 
 
 @app.on_event("startup")
@@ -629,7 +631,7 @@ def root():
             "utc": utc_now_iso(),
             "last_refresh_utc": CACHE.get("utc"),
             "active_count": len(CACHE.get("active_symbols") or []),
-            "compatibility": _scanner_compatibility_snapshot(),
+            "compatibility": _scanner_compatibility_snapshot_unlocked(),
         }
 
 
@@ -687,6 +689,8 @@ def build_info_endpoint():
 
 @app.get("/compatibility")
 def compatibility_endpoint():
+    with _CACHE_LOCK:
+        compatibility = _scanner_compatibility_snapshot_unlocked()
     return {
         "ok": True,
         "utc": utc_now_iso(),
@@ -697,7 +701,7 @@ def compatibility_endpoint():
             "env_name": PATCH_BUILD.get("env_name"),
             "release_stage": PATCH_BUILD.get("release_stage_configured"),
         },
-        "compatibility": _scanner_compatibility_snapshot(),
+        "compatibility": compatibility,
     }
 
 
@@ -729,7 +733,7 @@ def runtime_endpoint():
                 "active_count": len(CACHE.get("active_symbols") or []),
                 "active_symbols": CACHE.get("active_symbols") or [],
                 "telemetry": _suppression_snapshot(),
-                "compatibility": _scanner_compatibility_snapshot(),
+                "compatibility": _scanner_compatibility_snapshot_unlocked(),
             },
         }
 
@@ -785,7 +789,7 @@ def active_coins():
                     "last_error": CACHE.get("last_error"),
                     "last_refresh_utc": CACHE.get("utc"),
                     "active_symbols": [],
-                    "compatibility": _scanner_compatibility_snapshot(),
+                    "compatibility": _scanner_compatibility_snapshot_unlocked(),
                 },
             )
 
@@ -801,5 +805,5 @@ def active_coins():
             "futures_enabled": FUTURES_ENABLED,
             "last_error": CACHE.get("last_error"),
             "last_refresh_utc": CACHE.get("utc"),
-            "compatibility": _scanner_compatibility_snapshot(),
+            "compatibility": _scanner_compatibility_snapshot_unlocked(),
         }
