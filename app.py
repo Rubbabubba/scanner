@@ -646,6 +646,22 @@ def _guardrails_snapshot() -> Dict[str, Any]:
     }
 
 
+def _safe_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 0
+    try:
+        return len(value)
+    except Exception:
+        return 0
+
+
 def _compatibility_payload_unlocked() -> Dict[str, Any]:
     active_symbols = list(CACHE.get("active_symbols") or [])
     raw = dict(CACHE.get("raw") or {})
@@ -656,13 +672,13 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
     coord_summary = {
         "ok": bool(coord_raw.get("ok")),
         "reason": coord_raw.get("reason"),
-        "suppressed_symbols_count": len(coord_raw.get("suppressed_symbols") or []),
+        "suppressed_symbols_count": _safe_count(coord_raw.get("suppressed_symbols")),
         "suppressed_symbols_sample": list(coord_raw.get("suppressed_symbols") or [])[:12],
-        "hard_suppressed_symbols_count": len(coord_raw.get("hard_suppressed_symbols") or []),
+        "hard_suppressed_symbols_count": _safe_count(coord_raw.get("hard_suppressed_symbols")),
         "hard_suppressed_symbols_sample": list(coord_raw.get("hard_suppressed_symbols") or [])[:12],
-        "active_workflow_locks_count": len(coord_raw.get("active_workflow_locks") or []),
-        "recent_admission_passed_count": len(coord_raw.get("recent_admission_passed") or []),
-        "active_signal_fingerprints_count": len(coord_raw.get("active_signal_fingerprints") or []),
+        "active_workflow_locks_count": _safe_count(coord_raw.get("active_workflow_locks")),
+        "recent_admission_passed_count": _safe_count(coord_raw.get("recent_admission_passed")),
+        "active_signal_fingerprints_count": _safe_count(coord_raw.get("active_signal_fingerprints")),
     }
     return {
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
