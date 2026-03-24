@@ -656,10 +656,22 @@ def _safe_count(value: Any) -> int:
             return max(0, int(value))
         except Exception:
             return 0
-    try:
+    if isinstance(value, dict):
         return len(value)
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    try:
+        return len(value)  # type: ignore[arg-type]
     except Exception:
         return 0
+
+
+def _spread_bps_each_side_from_guardrails() -> float:
+    try:
+        return max(0.0, float(MAX_SPREAD_PCT) * 10000.0 / 2.0)
+    except Exception:
+        return 0.0
+
 
 
 def _compatibility_payload_unlocked() -> Dict[str, Any]:
@@ -672,13 +684,28 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
     coord_summary = {
         "ok": bool(coord_raw.get("ok")),
         "reason": coord_raw.get("reason"),
-        "suppressed_symbols_count": _safe_count(coord_raw.get("suppressed_symbols")),
+        "suppressed_symbols_count": int(coord_raw.get("suppressed_symbols_count") or _safe_count(coord_raw.get("suppressed_symbols"))),
         "suppressed_symbols_sample": list(coord_raw.get("suppressed_symbols") or [])[:12],
-        "hard_suppressed_symbols_count": _safe_count(coord_raw.get("hard_suppressed_symbols")),
+        "hard_suppressed_symbols_count": int(coord_raw.get("hard_suppressed_symbols_count") or _safe_count(coord_raw.get("hard_suppressed_symbols"))),
         "hard_suppressed_symbols_sample": list(coord_raw.get("hard_suppressed_symbols") or [])[:12],
-        "active_workflow_locks_count": _safe_count(coord_raw.get("active_workflow_locks")),
-        "recent_admission_passed_count": _safe_count(coord_raw.get("recent_admission_passed")),
-        "active_signal_fingerprints_count": _safe_count(coord_raw.get("active_signal_fingerprints")),
+        "active_workflow_locks_count": int(coord_raw.get("active_workflow_locks_count") or _safe_count(coord_raw.get("active_workflow_locks"))),
+        "recent_admission_passed_count": int(coord_raw.get("recent_admission_passed_count") or _safe_count(coord_raw.get("recent_admission_passed"))),
+        "active_signal_fingerprints_count": int(coord_raw.get("active_signal_fingerprints_count") or _safe_count(coord_raw.get("active_signal_fingerprints"))),
+    }
+    guardrails = _guardrails_snapshot()
+    fee_churn_truth = {
+        "spread_model": {
+            "max_spread_pct": float(MAX_SPREAD_PCT),
+            "expected_spread_bps_each_side": round(_spread_bps_each_side_from_guardrails(), 3),
+        },
+        "churn_model_inputs": {
+            "top_n": int(TOP_N),
+            "refresh_sec": int(REFRESH_SEC),
+            "symbol_holdoff_sec": int(SCANNER_SYMBOL_HOLDOFF_SEC),
+            "fingerprint_ttl_sec": int(SCANNER_FINGERPRINT_TTL_SEC),
+            "bar_lock_sec": int(SCANNER_BAR_LOCK_SEC),
+            "inflight_holdoff_sec": int(SCANNER_INFLIGHT_HOLDOFF_SEC),
+        },
     }
     return {
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
@@ -691,11 +718,12 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         "ranked_count": len(ranked),
         "last_refresh_utc": CACHE.get("utc"),
         "last_error": CACHE.get("last_error"),
-        "guardrails": _guardrails_snapshot(),
+        "guardrails": guardrails,
         "telemetry": telemetry,
         "suppression_counts": telemetry.get("last_refresh_counts") or {},
         "coordination": coord_summary,
         "coordination_raw": coord_raw,
+        "fee_churn_truth": fee_churn_truth,
     }
 
 
