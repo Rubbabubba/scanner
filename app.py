@@ -711,6 +711,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
         "mode": _scanner_mode(),
         "multi_symbol_capable": True,
+        "supports_multi_symbol": True,
         "active_count": len(active_symbols),
         "active_symbols": active_symbols,
         "active_symbols_sample": active_symbols[:12],
@@ -723,6 +724,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         "suppression_counts": telemetry.get("last_refresh_counts") or {},
         "coordination": coord_summary,
         "coordination_raw": coord_raw,
+        "active_symbols_source": "scanner_cache",
         "fee_churn_truth": fee_churn_truth,
     }
 
