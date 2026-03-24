@@ -652,6 +652,18 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
     telemetry = _suppression_snapshot()
     active_scores = dict(CACHE.get("scores") or {})
     ranked = sorted(active_symbols, key=lambda s: float(active_scores.get(s, 0.0)), reverse=True)
+    coord_raw = dict(raw.get("coordination") or {})
+    coord_summary = {
+        "ok": bool(coord_raw.get("ok")),
+        "reason": coord_raw.get("reason"),
+        "suppressed_symbols_count": len(coord_raw.get("suppressed_symbols") or []),
+        "suppressed_symbols_sample": list(coord_raw.get("suppressed_symbols") or [])[:12],
+        "hard_suppressed_symbols_count": len(coord_raw.get("hard_suppressed_symbols") or []),
+        "hard_suppressed_symbols_sample": list(coord_raw.get("hard_suppressed_symbols") or [])[:12],
+        "active_workflow_locks_count": len(coord_raw.get("active_workflow_locks") or []),
+        "recent_admission_passed_count": len(coord_raw.get("recent_admission_passed") or []),
+        "active_signal_fingerprints_count": len(coord_raw.get("active_signal_fingerprints") or []),
+    }
     return {
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
         "mode": _scanner_mode(),
@@ -666,7 +678,8 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         "guardrails": _guardrails_snapshot(),
         "telemetry": telemetry,
         "suppression_counts": telemetry.get("last_refresh_counts") or {},
-        "coordination": raw.get("coordination") or {},
+        "coordination": coord_summary,
+        "coordination_raw": coord_raw,
     }
 
 
