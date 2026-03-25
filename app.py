@@ -103,6 +103,25 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_symbol_list(name: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in str(os.getenv(name, "") or "").split(','):
+        sym = str(item or '').strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
+
+
 def _base(sym: str) -> str:
     return sym.split("/", 1)[0].upper()
 
@@ -273,6 +292,71 @@ def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], floa
         kept.append(item)
     return kept, {"suppressed_symbols": suppressed, "remaining": len(kept)}
 
+def _scanner_alignment_config() -> Dict[str, Any]:
+    alignment_enabled = _env_bool("BTC_ONLY_ALIGNMENT_ENABLED", False) or _env_bool("SCANNER_ALIGNMENT_ENABLED", False)
+    emit_only = _env_bool("SCANNER_EMIT_ONLY_SYMBOLS", False) or _env_bool("BTC_ONLY_ALIGNMENT_EMIT_ONLY", False)
+    force_symbols = _env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS")
+    if emit_only and force_symbols:
+        alignment_enabled = True
+    return {
+        "enabled": bool(alignment_enabled),
+        "emit_only": bool(emit_only),
+        "force_emit_symbols": force_symbols,
+        "mode": "emit_only" if emit_only else ("prepend_force_symbols" if alignment_enabled and force_symbols else ("enabled_no_force_symbols" if alignment_enabled else "off")),
+    }
+
+
+def _apply_alignment(candidate_symbols: List[str], scored_lookup: Dict[str, Tuple[float, List[str]]], tradable_symbols: set[str]) -> tuple[List[str], Dict[str, Any]]:
+    cfg = _scanner_alignment_config()
+    pre = []
+    seen = set()
+    for sym in candidate_symbols or []:
+        s = str(sym or '').strip().upper()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        pre.append(s)
+    force_requested = list(cfg.get("force_emit_symbols") or [])
+    force_valid: List[str] = []
+    force_invalid: List[str] = []
+    for sym in force_requested:
+        s = str(sym or '').strip().upper()
+        if not s:
+            continue
+        if s in tradable_symbols or s in scored_lookup:
+            force_valid.append(s)
+        else:
+            force_invalid.append(s)
+    out: List[str] = []
+    seen_out = set()
+    if cfg.get("emit_only"):
+        for sym in force_valid:
+            if sym in seen_out:
+                continue
+            seen_out.add(sym)
+            out.append(sym)
+    else:
+        for sym in force_valid + pre:
+            if sym in seen_out:
+                continue
+            seen_out.add(sym)
+            out.append(sym)
+    meta = {
+        "enabled": bool(cfg.get("enabled")),
+        "emit_only": bool(cfg.get("emit_only")),
+        "mode": cfg.get("mode"),
+        "force_emit_symbols": force_requested,
+        "force_emit_symbols_valid": force_valid,
+        "force_emit_symbols_invalid": force_invalid,
+        "pre_alignment_candidate_count": len(pre),
+        "pre_alignment_candidate_sample": pre[:12],
+        "post_alignment_candidate_count": len(out),
+        "post_alignment_candidate_sample": out[:12],
+        "alignment_active": bool(cfg.get("enabled") or cfg.get("emit_only") or force_requested),
+    }
+    return out, meta
+
+
 def _apply_scanner_emission_controls(symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
     now = _now_ts()
     ttl_sec = max(60, int(SCANNER_FINGERPRINT_TTL_SEC or 900))
@@ -341,6 +425,7 @@ def _compute_scan() -> Dict[str, Any]:
 
     in_play: List[Tuple[str, float, List[str], float, float]] = []
     fallback: List[Tuple[str, float, List[str], float, float]] = []
+    scored_lookup: Dict[str, Tuple[float, List[str]]] = {}
 
     # Track the best scored pair per base across *all* scored pairs,
     # so we can fill with MAJORS_FLOOR without relaxing thresholds.
@@ -380,6 +465,7 @@ def _compute_scan() -> Dict[str, Any]:
             continue
 
         reasons = spot_reasons + bonus_reasons
+        scored_lookup[str(sym).upper()] = (float(total), list(reasons))
 
         # Save best pair for this base regardless of thresholds (for majors floor)
         b = _base(sym)
@@ -469,9 +555,11 @@ def _compute_scan() -> Dict[str, Any]:
             existing.add(sym)
 
     candidate_symbols = [str(s or '').upper() for (s, _, _, _, _) in filtered_top]
+    candidate_symbols, alignment_meta = _apply_alignment(candidate_symbols, scored_lookup, set(str(s or '').upper() for s in pairs))
     candidate_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(candidate_symbols)
     active_symbols, emission_meta = _apply_scanner_emission_controls(candidate_symbols)
     top_by_symbol = {str(s).upper(): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
+    top_by_symbol.update(scored_lookup)
     scores = {s: float(top_by_symbol[s][0]) for s in active_symbols if s in top_by_symbol}
     reasons = {s: top_by_symbol[s][1] for s in active_symbols if s in top_by_symbol}
 
@@ -515,6 +603,7 @@ def _compute_scan() -> Dict[str, Any]:
             "majors_floor_added": majors_added,
             "dedup_by_base": DEDUP_BY_BASE,
             "fill_to_top_n": FILL_TO_TOP_N,
+            "alignment": alignment_meta,
             "strict_thresholds": {
                 "min_24h_usd_vol": MIN_24H_USD_VOL,
                 "min_24h_range_pct": MIN_24H_RANGE_PCT,
@@ -707,6 +796,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
             "inflight_holdoff_sec": int(SCANNER_INFLIGHT_HOLDOFF_SEC),
         },
     }
+    alignment = dict(raw.get("alignment") or {})
     return {
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
         "mode": _scanner_mode(),
@@ -725,6 +815,13 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         "coordination": coord_summary,
         "coordination_raw": coord_raw,
         "active_symbols_source": "scanner_cache",
+        "alignment": alignment,
+        "btc_only_live_alignment": {
+            "enabled": bool(alignment.get("alignment_active")),
+            "emit_only": bool(alignment.get("emit_only")),
+            "force_emit_symbols": list(alignment.get("force_emit_symbols") or []),
+            "active_symbols_all_admissible": bool(active_symbols) and all(str(s or '').upper() in set(list(alignment.get("force_emit_symbols_valid") or []) or list(alignment.get("force_emit_symbols") or [])) for s in active_symbols) if bool(alignment.get("emit_only")) else False,
+        },
         "fee_churn_truth": fee_churn_truth,
     }
 
