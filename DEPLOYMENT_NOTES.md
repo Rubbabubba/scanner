@@ -26,3 +26,7 @@ Notes:
 
 ## Patch 011
 - Forced-symbol normalization and BTC emit repair.
+
+
+## Patch 012
+- Added BTC-only live promotion guardrails diagnostics and release-proof marker.
