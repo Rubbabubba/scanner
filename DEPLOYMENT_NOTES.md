@@ -30,3 +30,7 @@ Notes:
 
 ## Patch 012
 - Added BTC-only live promotion guardrails diagnostics and release-proof marker.
+
+## Patch 014
+- Dashboard now reuses a single fresh compatibility/pretrade snapshot for promotion/readiness blocks to prevent mixed-time-state output.
+- No strategy, execution, or worker behavior changes.
