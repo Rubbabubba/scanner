@@ -122,6 +122,58 @@ def _env_symbol_list(name: str) -> List[str]:
     return out
 
 
+def _normalize_emit_symbol(sym: str) -> str:
+    s = str(sym or '').strip().upper().replace('-', '/').replace(':', '/')
+    if not s:
+        return ''
+    if '/' not in s:
+        for q in sorted(QUOTE_ALLOW, key=len, reverse=True):
+            if s.endswith(q):
+                s = f"{s[:-len(q)]}/{q}"
+                break
+    if '/' not in s:
+        return s
+    base, quote = s.split('/', 1)
+    base = 'BTC' if base in ('XBT', 'XXBT') else base
+    quote = quote.upper()
+    return f"{base}/{quote}"
+
+
+def _alignment_symbol_candidates(sym: str) -> List[str]:
+    n = _normalize_emit_symbol(sym)
+    if not n:
+        return []
+    out: List[str] = []
+    seen = set()
+    def add(v: str):
+        v = str(v or '').strip().upper()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    add(n)
+    if '/' in n:
+        base, quote = n.split('/', 1)
+        if base == 'BTC':
+            add(f"XBT/{quote}")
+        elif base == 'XBT':
+            add(f"BTC/{quote}")
+        add(f"{base}{quote}")
+    return out
+
+
+def _resolve_force_emit_symbol(sym: str, tradable_symbols: set[str], scored_lookup: Dict[str, Tuple[float, List[str]]]) -> tuple[str | None, Dict[str, Any]]:
+    tradable = {str(s or '').upper() for s in (tradable_symbols or set())}
+    scored = {str(s or '').upper() for s in (scored_lookup or {}).keys()}
+    candidates = _alignment_symbol_candidates(sym)
+    for cand in candidates:
+        if cand in tradable or cand in scored:
+            return cand, {"requested": str(sym or '').strip().upper(), "normalized": _normalize_emit_symbol(sym), "resolved": cand, "resolution": "matched"}
+    normalized = _normalize_emit_symbol(sym)
+    if normalized.startswith('BTC/') and normalized.split('/', 1)[1] in QUOTE_ALLOW:
+        return normalized, {"requested": str(sym or '').strip().upper(), "normalized": normalized, "resolved": normalized, "resolution": "btc_alias_fallback"}
+    return None, {"requested": str(sym or '').strip().upper(), "normalized": normalized, "resolved": None, "resolution": "unresolved"}
+
+
 def _base(sym: str) -> str:
     return sym.split("/", 1)[0].upper()
 
@@ -319,14 +371,17 @@ def _apply_alignment(candidate_symbols: List[str], scored_lookup: Dict[str, Tupl
     force_requested = list(cfg.get("force_emit_symbols") or [])
     force_valid: List[str] = []
     force_invalid: List[str] = []
+    force_resolution: List[Dict[str, Any]] = []
     for sym in force_requested:
-        s = str(sym or '').strip().upper()
-        if not s:
-            continue
-        if s in tradable_symbols or s in scored_lookup:
-            force_valid.append(s)
+        resolved, info = _resolve_force_emit_symbol(sym, tradable_symbols, scored_lookup)
+        force_resolution.append(info)
+        if resolved:
+            if resolved not in force_valid:
+                force_valid.append(resolved)
         else:
-            force_invalid.append(s)
+            requested = str(sym or '').strip().upper()
+            if requested and requested not in force_invalid:
+                force_invalid.append(requested)
     out: List[str] = []
     seen_out = set()
     if cfg.get("emit_only"):
@@ -348,6 +403,7 @@ def _apply_alignment(candidate_symbols: List[str], scored_lookup: Dict[str, Tupl
         "force_emit_symbols": force_requested,
         "force_emit_symbols_valid": force_valid,
         "force_emit_symbols_invalid": force_invalid,
+        "force_emit_resolution": force_resolution,
         "pre_alignment_candidate_count": len(pre),
         "pre_alignment_candidate_sample": pre[:12],
         "post_alignment_candidate_count": len(out),
@@ -562,6 +618,13 @@ def _compute_scan() -> Dict[str, Any]:
     top_by_symbol.update(scored_lookup)
     scores = {s: float(top_by_symbol[s][0]) for s in active_symbols if s in top_by_symbol}
     reasons = {s: top_by_symbol[s][1] for s in active_symbols if s in top_by_symbol}
+    alignment_force_valid = list(alignment_meta.get("force_emit_symbols_valid") or [])
+    for s in active_symbols:
+        if s in scores:
+            continue
+        if s in alignment_force_valid:
+            scores[s] = 0.0
+            reasons[s] = ["alignment_forced_emit"]
 
     refresh_counts = {
         "scanner_candidates": len(top),
@@ -820,6 +883,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
             "enabled": bool(alignment.get("alignment_active")),
             "emit_only": bool(alignment.get("emit_only")),
             "force_emit_symbols": list(alignment.get("force_emit_symbols") or []),
+            "force_emit_resolution": list(alignment.get("force_emit_resolution") or []),
             "active_symbols_all_admissible": bool(active_symbols) and all(str(s or '').upper() in set(list(alignment.get("force_emit_symbols_valid") or []) or list(alignment.get("force_emit_symbols") or [])) for s in active_symbols) if bool(alignment.get("emit_only")) else False,
         },
         "fee_churn_truth": fee_churn_truth,
