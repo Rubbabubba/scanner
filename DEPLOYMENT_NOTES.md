@@ -1,5 +1,3 @@
-# Patch 018 — Scanner Baseline Sync
+# Patch 019 — Scanner build sync only
 
-Scanner logic is unchanged in Patch 018.
-
-This package only updates build identity so the deployed system has a clean, matching Patch 018 baseline across main and scanner.
+No scanner logic changes. Build identity synced so Patch 019 is the clean system baseline.
