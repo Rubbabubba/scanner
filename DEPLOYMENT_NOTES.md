@@ -1,3 +1,4 @@
-# Patch 021 Deployment Notes
+# Patch 022 Deployment Notes
 
-Drop-in ready patch zip.
+- Scanner logic unchanged.
+- Build identity bumped so Patch 022 is the clean full-system baseline paired with the main hotfix.
