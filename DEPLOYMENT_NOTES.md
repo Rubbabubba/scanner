@@ -1,3 +1,3 @@
-# Patch 019 — Scanner build sync only
+# Patch 020 Deployment Notes
 
-No scanner logic changes. Build identity synced so Patch 019 is the clean system baseline.
+Scanner code is unchanged. This package only advances build identity so the deployed patch set stays aligned with main Patch 020.
