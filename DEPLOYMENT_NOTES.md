@@ -1,1 +1,1 @@
-Patch 023 scanner baseline sync. No scanner logic changes.
+Patch 024 scanner build sync
