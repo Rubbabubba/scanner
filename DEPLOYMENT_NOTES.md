@@ -1,46 +1,5 @@
-Patch 010 — BTC-Only Live Readiness Alignment
+# Patch 018 — Scanner Baseline Sync
 
-Purpose:
-- Fastest safe path toward live in controlled BTC-only mode
-- Preserve future Path B multi-symbol architecture
-- Add scanner-side alignment controls and main-side truth for BTC-only readiness
+Scanner logic is unchanged in Patch 018.
 
-Key scanner envs (safe defaults are OFF):
-- BTC_ONLY_ALIGNMENT_ENABLED=1
-- SCANNER_FORCE_EMIT_SYMBOLS=BTC/USD
-- SCANNER_EMIT_ONLY_SYMBOLS=1
-
-Optional aliases also supported:
-- BTC_ONLY_ALIGNMENT_SYMBOLS=BTC/USD
-- BTC_ONLY_ALIGNMENT_EMIT_ONLY=1
-
-Main diagnostics added/updated:
-- /compatibility -> btc_only_live_alignment block
-- /diagnostics/btc_only_live_alignment
-
-Notes:
-- This patch does not remove or weaken Path B controls.
-- This patch does not change strategy or execution logic.
-- Path B future architecture remains intact.
-
-
-## Patch 011
-- Forced-symbol normalization and BTC emit repair.
-
-
-## Patch 012
-- Added BTC-only live promotion guardrails diagnostics and release-proof marker.
-
-## Patch 014
-- Dashboard now reuses a single fresh compatibility/pretrade snapshot for promotion/readiness blocks to prevent mixed-time-state output.
-- No strategy, execution, or worker behavior changes.
-
-## Patch 016
-- Main: added merged broker-holdings truth, broker-aware open-position detection, and /diagnostics/holdings_truth.
-- Main: exit/position/adoption paths now use merged broker holdings so live broker inventory is visible even if one balance parsing path misses it.
-- Scanner: no strategy or emission logic changes; build/version synced to Patch 016 for clean baseline management.
-
-
-## Patch 017
-- Scanner: no strategy or emission logic changes.
-- Scanner build/version synced to Patch 017 so deployed main + scanner share the same patch identity baseline.
+This package only updates build identity so the deployed system has a clean, matching Patch 018 baseline across main and scanner.
