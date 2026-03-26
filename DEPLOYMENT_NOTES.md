@@ -39,3 +39,8 @@ Notes:
 - Main: added merged broker-holdings truth, broker-aware open-position detection, and /diagnostics/holdings_truth.
 - Main: exit/position/adoption paths now use merged broker holdings so live broker inventory is visible even if one balance parsing path misses it.
 - Scanner: no strategy or emission logic changes; build/version synced to Patch 016 for clean baseline management.
+
+
+## Patch 017
+- Scanner: no strategy or emission logic changes.
+- Scanner build/version synced to Patch 017 so deployed main + scanner share the same patch identity baseline.
