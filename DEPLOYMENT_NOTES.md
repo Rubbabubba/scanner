@@ -34,3 +34,8 @@ Notes:
 ## Patch 014
 - Dashboard now reuses a single fresh compatibility/pretrade snapshot for promotion/readiness blocks to prevent mixed-time-state output.
 - No strategy, execution, or worker behavior changes.
+
+## Patch 016
+- Main: added merged broker-holdings truth, broker-aware open-position detection, and /diagnostics/holdings_truth.
+- Main: exit/position/adoption paths now use merged broker holdings so live broker inventory is visible even if one balance parsing path misses it.
+- Scanner: no strategy or emission logic changes; build/version synced to Patch 016 for clean baseline management.
