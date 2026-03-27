@@ -66,8 +66,8 @@ SCANNER_COORDINATION_TIMEOUT_SEC = float(os.getenv("SCANNER_COORDINATION_TIMEOUT
 SCANNER_COORDINATION_LOOKBACK_SEC = int(os.getenv("SCANNER_COORDINATION_LOOKBACK_SEC", "900") or 900)
 SCANNER_SYMBOL_HOLDOFF_SEC = int(os.getenv("SCANNER_SYMBOL_HOLDOFF_SEC", "0") or 0)
 SCANNER_FINGERPRINT_TTL_SEC = int(os.getenv("SCANNER_FINGERPRINT_TTL_SEC", str(max(900, SCANNER_COORDINATION_LOOKBACK_SEC or 900))) or max(900, SCANNER_COORDINATION_LOOKBACK_SEC or 900))
-SCANNER_BAR_LOCK_SEC = int(os.getenv("SCANNER_BAR_LOCK_SEC", str(max(60, REFRESH_SEC))) or max(60, REFRESH_SEC))
-SCANNER_INFLIGHT_HOLDOFF_SEC = int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str(max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))) or max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))
+SCANNER_BAR_LOCK_SEC = max(60, int(os.getenv("SCANNER_BAR_LOCK_SEC", str(max(60, REFRESH_SEC))) or max(60, REFRESH_SEC)))
+SCANNER_INFLIGHT_HOLDOFF_SEC = max(60, int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str(max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))) or max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC)))
 
 
 app = FastAPI(title="Crypto Scanner", version="1.4.0")
@@ -122,26 +122,6 @@ def _env_symbol_list(name: str) -> List[str]:
     return out
 
 
-
-
-def _pilot_expand_force_symbols(symbols: List[str]) -> List[str]:
-    """
-    Controlled Patch 030 scanner pilot expansion:
-    preserve explicit multi-symbol configs, but when the scanner is locked to
-    exactly BTC/USD expand the forced emit universe to BTC/USD, ETH/USD, SOL/USD.
-    """
-    cleaned: List[str] = []
-    seen = set()
-    for item in symbols or []:
-        sym = str(item or '').strip().upper()
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        cleaned.append(sym)
-    if cleaned == ["BTC/USD"]:
-        return ["BTC/USD", "ETH/USD", "SOL/USD"]
-    return cleaned
-
 def _normalize_emit_symbol(sym: str) -> str:
     s = str(sym or '').strip().upper().replace('-', '/').replace(':', '/')
     if not s:
@@ -154,7 +134,15 @@ def _normalize_emit_symbol(sym: str) -> str:
     if '/' not in s:
         return s
     base, quote = s.split('/', 1)
-    base = 'BTC' if base in ('XBT', 'XXBT') else base
+    alias_map = {
+        'XBT': 'BTC',
+        'XXBT': 'BTC',
+        'XETH': 'ETH',
+        'XXETH': 'ETH',
+        'XSOL': 'SOL',
+        'XXSOL': 'SOL',
+    }
+    base = alias_map.get(base, base)
     quote = quote.upper()
     return f"{base}/{quote}"
 
@@ -364,10 +352,17 @@ def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], floa
         kept.append(item)
     return kept, {"suppressed_symbols": suppressed, "remaining": len(kept)}
 
+
+def _pilot_force_emit_symbols() -> List[str]:
+    requested = _env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS")
+    if requested == ["BTC/USD"]:
+        return ["BTC/USD", "ETH/USD", "SOL/USD"]
+    return requested
+
 def _scanner_alignment_config() -> Dict[str, Any]:
     alignment_enabled = _env_bool("BTC_ONLY_ALIGNMENT_ENABLED", False) or _env_bool("SCANNER_ALIGNMENT_ENABLED", False)
     emit_only = _env_bool("SCANNER_EMIT_ONLY_SYMBOLS", False) or _env_bool("BTC_ONLY_ALIGNMENT_EMIT_ONLY", False)
-    force_symbols = _pilot_expand_force_symbols(_env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS"))
+    force_symbols = _pilot_force_emit_symbols()
     if emit_only and force_symbols:
         alignment_enabled = True
     return {

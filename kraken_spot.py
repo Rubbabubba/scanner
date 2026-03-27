@@ -27,8 +27,15 @@ def list_spot_pairs(quotes: List[str], limit: int = 250) -> List[str]:
         if quote not in quotes:
             continue
 
-        # Normalize XBT -> BTC for UI
-        base = "BTC" if base.upper() == "XBT" else base.upper()
+        # Normalize Kraken-style asset aliases for UI
+        base_u = base.upper()
+        if base_u in ("XBT", "XXBT"):
+            base_u = "BTC"
+        elif base_u in ("ETH", "XETH"):
+            base_u = "ETH"
+        elif base_u in ("SOL", "XSOL"):
+            base_u = "SOL"
+        base = base_u
         out.append(f"{base}/{quote}")
 
         if len(out) >= limit:
