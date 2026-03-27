@@ -1,3 +1,3 @@
-Patch 024 scanner build sync
+# patch-032-scanner-candidate-alias-mapping-eth-sol-fallback
 
-Patch 026: scanner paired build identity only.
+Scanner alias-resolution cleanup for ETH/SOL force-emit fallback.

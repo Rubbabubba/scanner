@@ -137,10 +137,13 @@ def _normalize_emit_symbol(sym: str) -> str:
     alias_map = {
         'XBT': 'BTC',
         'XXBT': 'BTC',
+        'XXBTZ': 'BTC',
         'XETH': 'ETH',
         'XXETH': 'ETH',
+        'XETHZ': 'ETH',
         'XSOL': 'SOL',
         'XXSOL': 'SOL',
+        'XSOLZ': 'SOL',
     }
     base = alias_map.get(base, base)
     quote = quote.upper()
@@ -161,11 +164,20 @@ def _alignment_symbol_candidates(sym: str) -> List[str]:
     add(n)
     if '/' in n:
         base, quote = n.split('/', 1)
-        if base == 'BTC':
-            add(f"XBT/{quote}")
-        elif base == 'XBT':
-            add(f"BTC/{quote}")
+        alias_bases = {
+            'BTC': ['XBT', 'XXBT', 'XXBTZ'],
+            'ETH': ['XETH', 'XXETH', 'XETHZ'],
+            'SOL': ['XSOL', 'XXSOL', 'XSOLZ'],
+            'XBT': ['BTC', 'XXBT', 'XXBTZ'],
+        }
+        for alias_base in alias_bases.get(base, []):
+            add(f"{alias_base}/{quote}")
+            add(f"{alias_base}{quote}")
+            if quote == 'USD':
+                add(f"{alias_base}ZUSD")
         add(f"{base}{quote}")
+        if quote == 'USD':
+            add(f"{base}ZUSD")
     return out
 
 
@@ -177,8 +189,15 @@ def _resolve_force_emit_symbol(sym: str, tradable_symbols: set[str], scored_look
         if cand in tradable or cand in scored:
             return cand, {"requested": str(sym or '').strip().upper(), "normalized": _normalize_emit_symbol(sym), "resolved": cand, "resolution": "matched"}
     normalized = _normalize_emit_symbol(sym)
-    if normalized.startswith('BTC/') and normalized.split('/', 1)[1] in QUOTE_ALLOW:
-        return normalized, {"requested": str(sym or '').strip().upper(), "normalized": normalized, "resolved": normalized, "resolution": "btc_alias_fallback"}
+    if '/' in normalized:
+        base, quote = normalized.split('/', 1)
+        if quote in QUOTE_ALLOW and base in ('BTC', 'ETH', 'SOL'):
+            return normalized, {
+                "requested": str(sym or '').strip().upper(),
+                "normalized": normalized,
+                "resolved": normalized,
+                "resolution": f"{base.lower()}_alias_fallback",
+            }
     return None, {"requested": str(sym or '').strip().upper(), "normalized": normalized, "resolved": None, "resolution": "unresolved"}
 
 
