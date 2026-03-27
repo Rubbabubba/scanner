@@ -122,13 +122,25 @@ def _env_symbol_list(name: str) -> List[str]:
     return out
 
 
-def _pilot_force_symbols(symbols: List[str]) -> List[str]:
-    trio = ["BTC/USD", "ETH/USD", "SOL/USD"]
-    normalized = [_normalize_emit_symbol(s) for s in (symbols or []) if _normalize_emit_symbol(s)]
-    if normalized == ["BTC/USD"]:
-        return trio
-    return normalized
 
+
+def _pilot_expand_force_symbols(symbols: List[str]) -> List[str]:
+    """
+    Controlled Patch 030 scanner pilot expansion:
+    preserve explicit multi-symbol configs, but when the scanner is locked to
+    exactly BTC/USD expand the forced emit universe to BTC/USD, ETH/USD, SOL/USD.
+    """
+    cleaned: List[str] = []
+    seen = set()
+    for item in symbols or []:
+        sym = str(item or '').strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        cleaned.append(sym)
+    if cleaned == ["BTC/USD"]:
+        return ["BTC/USD", "ETH/USD", "SOL/USD"]
+    return cleaned
 
 def _normalize_emit_symbol(sym: str) -> str:
     s = str(sym or '').strip().upper().replace('-', '/').replace(':', '/')
@@ -355,7 +367,7 @@ def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], floa
 def _scanner_alignment_config() -> Dict[str, Any]:
     alignment_enabled = _env_bool("BTC_ONLY_ALIGNMENT_ENABLED", False) or _env_bool("SCANNER_ALIGNMENT_ENABLED", False)
     emit_only = _env_bool("SCANNER_EMIT_ONLY_SYMBOLS", False) or _env_bool("BTC_ONLY_ALIGNMENT_EMIT_ONLY", False)
-    force_symbols = _pilot_force_symbols(_env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS"))
+    force_symbols = _pilot_expand_force_symbols(_env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS"))
     if emit_only and force_symbols:
         alignment_enabled = True
     return {
