@@ -1,3 +1,3 @@
-# patch-032-scanner-candidate-alias-mapping-eth-sol-fallback
+# patch-033-tc0-trade-quality-tuning
 
-Scanner alias-resolution cleanup for ETH/SOL force-emit fallback.
+Scanner artifact hygiene only for paired baseline.
