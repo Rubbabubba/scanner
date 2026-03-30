@@ -1,5 +1,5 @@
-# patch-036-readiness-compatibility-hotfix
+# patch-037-rb1-dedupe-repeat-entry-tolerance-tuning
 
 Changes:
-- Build identity / paired-release hotfix on top of Patch 035.
+- Paired-release build identity only on top of Patch 036.
 - No scanner behavior changes.
