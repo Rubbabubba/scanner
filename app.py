@@ -27,7 +27,7 @@ if FUTURES_ENABLED:
 # Config
 # -------------------------
 REFRESH_SEC = int(os.getenv("SCAN_REFRESH_SEC", "300") or 300)  # 5m
-TOP_N = int(os.getenv("TOP_N", "10") or 10)
+TOP_N = int(os.getenv("TOP_N", "7") or 7)
 QUOTE_ALLOW = [q.strip().upper() for q in os.getenv("QUOTE_ALLOW", "USD,USDT,USDC").split(",") if q.strip()]
 MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250") or 250)
 
@@ -374,10 +374,14 @@ def _apply_coordination_suppression(pool: List[Tuple[str, float, List[str], floa
 
 def _pilot_force_emit_symbols() -> List[str]:
     requested = _env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS")
+    contract_safe_7 = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "LINK/USD", "AVAX/USD", "DOT/USD"]
+    contract_unsafe_10 = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "LINK/USD", "AVAX/USD", "LTC/USD", "DOT/USD"]
     if requested == ["BTC/USD"]:
         return ["BTC/USD", "ETH/USD", "SOL/USD"]
     if requested == ["BTC/USD", "ETH/USD", "SOL/USD"]:
-        return ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "LINK/USD", "AVAX/USD", "LTC/USD", "DOT/USD"]
+        return contract_safe_7
+    if requested == contract_unsafe_10:
+        return contract_safe_7
     return requested
 
 def _scanner_alignment_config() -> Dict[str, Any]:
