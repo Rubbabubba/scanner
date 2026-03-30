@@ -27,7 +27,7 @@ if FUTURES_ENABLED:
 # Config
 # -------------------------
 REFRESH_SEC = int(os.getenv("SCAN_REFRESH_SEC", "300") or 300)  # 5m
-TOP_N = int(os.getenv("TOP_N", "5") or 5)
+TOP_N = int(os.getenv("TOP_N", "10") or 10)
 QUOTE_ALLOW = [q.strip().upper() for q in os.getenv("QUOTE_ALLOW", "USD,USDT,USDC").split(",") if q.strip()]
 MAX_PAIRS = int(os.getenv("MAX_PAIRS", "250") or 250)
 
@@ -376,6 +376,8 @@ def _pilot_force_emit_symbols() -> List[str]:
     requested = _env_symbol_list("SCANNER_FORCE_EMIT_SYMBOLS") or _env_symbol_list("BTC_ONLY_ALIGNMENT_SYMBOLS")
     if requested == ["BTC/USD"]:
         return ["BTC/USD", "ETH/USD", "SOL/USD"]
+    if requested == ["BTC/USD", "ETH/USD", "SOL/USD"]:
+        return ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "DOGE/USD", "LINK/USD", "AVAX/USD", "LTC/USD", "DOT/USD"]
     return requested
 
 def _scanner_alignment_config() -> Dict[str, Any]:
