@@ -1,4 +1,4 @@
-# patch-043-explicit-journal-lifecycle-provenance-bridge-forced-strategy-rewrite
+# patch-044-backfill-family-specific-provenance-mapping
 
 Changes:
 - Paired-release build identity only.
