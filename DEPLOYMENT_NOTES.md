@@ -1,4 +1,4 @@
-# patch-040-journal-persistence-lifecycle-strategy-provenance-fix
+# patch-041-backfill-strategy-mapping-unmatched-sell-recovery
 
 Changes:
 - Paired-release build identity only.
