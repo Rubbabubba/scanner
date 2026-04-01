@@ -1,5 +1,5 @@
-# patch-037-rb1-dedupe-repeat-entry-tolerance-tuning
+# patch-038-reconciled-exit-dedupe-qty-truth-pnl-truth-fix
 
 Changes:
-- Paired-release build identity only on top of Patch 036.
+- Paired-release build identity only.
 - No scanner behavior changes.
