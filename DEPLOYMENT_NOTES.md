@@ -1,4 +1,4 @@
-# patch-039-reconciled-strategy-attribution-preservation
+# patch-040-journal-persistence-lifecycle-strategy-provenance-fix
 
 Changes:
 - Paired-release build identity only.
