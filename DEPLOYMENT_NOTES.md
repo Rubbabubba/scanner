@@ -1,4 +1,4 @@
-# patch-038-reconciled-exit-dedupe-qty-truth-pnl-truth-fix
+# patch-039-reconciled-strategy-attribution-preservation
 
 Changes:
 - Paired-release build identity only.
