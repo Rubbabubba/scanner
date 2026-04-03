@@ -1,5 +1,5 @@
-# patch-047-profitability-filter-bugfix-and-min-edge-enforcement
+# patch-048-universe-quality-expansion-adopted-hard-disable-invalid-active-symbols-fix
 
 Changes:
-- Paired-release build identity only.
-- No scanner behavior changes.
+- Paired-release build identity.
+- No scanner execution changes required.
