@@ -70,7 +70,7 @@ SCANNER_BAR_LOCK_SEC = max(60, int(os.getenv("SCANNER_BAR_LOCK_SEC", str(max(60,
 SCANNER_INFLIGHT_HOLDOFF_SEC = max(60, int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str(max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))) or max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC)))
 
 
-app = FastAPI(title="Crypto Scanner", version="1.4.2")
+app = FastAPI(title="Crypto Scanner", version="1.4.3")
 
 PATCH_BUILD = build_payload()
 
@@ -109,6 +109,51 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return bool(default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
+
+
+SCANNER_MIN_SCORE = float(os.getenv("SCANNER_MIN_SCORE", "0") or 0)
+SCANNER_MIN_REASON_COUNT = int(os.getenv("SCANNER_MIN_REASON_COUNT", "0") or 0)
+SCANNER_REQUIRE_RANGE_OR_VOLUME = _env_bool("SCANNER_REQUIRE_RANGE_OR_VOLUME", False)
+SCANNER_DROP_TIGHT_SPREAD_ONLY = _env_bool("SCANNER_DROP_TIGHT_SPREAD_ONLY", False)
+SCANNER_DROP_ATR_AND_SPREAD_ONLY = _env_bool("SCANNER_DROP_ATR_AND_SPREAD_ONLY", False)
+
+def _quality_gate(total: float, reasons: List[str]) -> tuple[bool, Dict[str, Any]]:
+    reason_list = [str(r or '').strip() for r in (reasons or []) if str(r or '').strip()]
+    structural = [r for r in reason_list if r not in ("fallback_pool", "majors_floor")]
+    structural_set = set(structural)
+    has_range = any(r.startswith("range_24h_") for r in structural_set)
+    has_volume = any(r.startswith("vol_24h_") for r in structural_set)
+    reason_count = len(structural_set)
+    tight_spread_only = structural_set == {"tight_spread"}
+    atr_and_spread_only = structural_set == {"atr_active", "tight_spread"}
+    failures: List[str] = []
+    if float(total) < float(SCANNER_MIN_SCORE):
+        failures.append("min_score")
+    if int(reason_count) < int(SCANNER_MIN_REASON_COUNT):
+        failures.append("min_reason_count")
+    if bool(SCANNER_REQUIRE_RANGE_OR_VOLUME) and not (has_range or has_volume):
+        failures.append("range_or_volume_required")
+    if bool(SCANNER_DROP_TIGHT_SPREAD_ONLY) and tight_spread_only:
+        failures.append("tight_spread_only")
+    if bool(SCANNER_DROP_ATR_AND_SPREAD_ONLY) and atr_and_spread_only:
+        failures.append("atr_and_spread_only")
+    return (len(failures) == 0), {
+        "pass": len(failures) == 0,
+        "failures": failures,
+        "score": float(total),
+        "reason_count": int(reason_count),
+        "has_range": bool(has_range),
+        "has_volume": bool(has_volume),
+        "tight_spread_only": bool(tight_spread_only),
+        "atr_and_spread_only": bool(atr_and_spread_only),
+        "config": {
+            "min_score": float(SCANNER_MIN_SCORE),
+            "min_reason_count": int(SCANNER_MIN_REASON_COUNT),
+            "require_range_or_volume": bool(SCANNER_REQUIRE_RANGE_OR_VOLUME),
+            "drop_tight_spread_only": bool(SCANNER_DROP_TIGHT_SPREAD_ONLY),
+            "drop_atr_and_spread_only": bool(SCANNER_DROP_ATR_AND_SPREAD_ONLY),
+        },
+    }
 
 def _env_symbol_list(name: str) -> List[str]:
     out: List[str] = []
@@ -561,6 +606,9 @@ def _compute_scan() -> Dict[str, Any]:
             continue
 
         reasons = spot_reasons + bonus_reasons
+        quality_ok, quality_meta = _quality_gate(float(total), list(reasons))
+        if not quality_ok:
+            continue
         scored_lookup[str(sym).upper()] = (float(total), list(reasons))
 
         # Save best pair for this base regardless of thresholds (for majors floor)
@@ -706,6 +754,13 @@ def _compute_scan() -> Dict[str, Any]:
             "majors_floor_added": majors_added,
             "dedup_by_base": DEDUP_BY_BASE,
             "fill_to_top_n": FILL_TO_TOP_N,
+            "quality_gate": {
+                "min_score": float(SCANNER_MIN_SCORE),
+                "min_reason_count": int(SCANNER_MIN_REASON_COUNT),
+                "require_range_or_volume": bool(SCANNER_REQUIRE_RANGE_OR_VOLUME),
+                "drop_tight_spread_only": bool(SCANNER_DROP_TIGHT_SPREAD_ONLY),
+                "drop_atr_and_spread_only": bool(SCANNER_DROP_ATR_AND_SPREAD_ONLY),
+            },
             "alignment": alignment_meta,
             "strict_thresholds": {
                 "min_24h_usd_vol": MIN_24H_USD_VOL,
