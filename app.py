@@ -70,7 +70,7 @@ SCANNER_BAR_LOCK_SEC = max(60, int(os.getenv("SCANNER_BAR_LOCK_SEC", str(max(60,
 SCANNER_INFLIGHT_HOLDOFF_SEC = max(60, int(os.getenv("SCANNER_INFLIGHT_HOLDOFF_SEC", str(max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC))) or max(SCANNER_SYMBOL_HOLDOFF_SEC, SCANNER_BAR_LOCK_SEC)))
 
 
-app = FastAPI(title="Crypto Scanner", version="1.4.1")
+app = FastAPI(title="Crypto Scanner", version="1.4.2")
 
 PATCH_BUILD = build_payload()
 

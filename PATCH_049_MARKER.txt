@@ -1,2 +1,1 @@
-Patch 049
-Scanner marker for profitability unlock deployment.
+Patch 049 scanner marker: profitability unlock scanner baseline.

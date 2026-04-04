@@ -1,0 +1,1 @@
+Patch 050 scanner marker: baseline sync, no logic regression.
