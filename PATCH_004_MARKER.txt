@@ -1,2 +1,0 @@
-patch-004-coordination-pilot-gate
-service=scanner
