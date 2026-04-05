@@ -1,1 +1,0 @@
-Patch 056 scanner marker sync for tc1 observability
