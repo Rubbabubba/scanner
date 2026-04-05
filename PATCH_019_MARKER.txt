@@ -1,1 +1,0 @@
-patch-019-adopted-position-lifecycle-control
