@@ -1,0 +1,1 @@
+Patch 057 scanner marker sync for tc1 long momentum confirmation + no-trade floor

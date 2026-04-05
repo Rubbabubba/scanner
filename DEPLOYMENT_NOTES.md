@@ -1,8 +1,6 @@
-# Patch 053 Scanner
+# Patch 057
 
-Marker sync only. No scanner logic changes from Patch 052.
+No-drift baseline sync patch from Patch 056.
 
-
-## Patch 055
-- Build marker updated to `patch-055-scanner-marker-sync-long-only-tpc1-hardening`.
-- No-drift baseline sync for long-only TPC1 quality hardening env calibration.
+Build marker updated to `patch-057-scanner-marker-sync-tc1-long-momentum-floor`.
+Use the env changes listed in chat.
