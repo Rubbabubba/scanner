@@ -1,8 +1,6 @@
-# Patch 053 Scanner
+# Patch 059
 
-Marker sync only. No scanner logic changes from Patch 052.
+No-drift baseline sync built from Patch 058 reference.
 
-
-## Patch 055
-- Build marker updated to `patch-058-scanner-marker-sync-tc1-selective-re-entry`.
-- No-drift baseline sync for long-only TPC1 quality hardening env calibration.
+Build marker updated to `patch-059-scanner-marker-sync-tc1-breakout-confirmation`.
+Use the env changes listed in chat.

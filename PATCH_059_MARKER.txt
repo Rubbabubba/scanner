@@ -1,0 +1,1 @@
+Patch 059 scanner marker sync for tc1 momentum breakout confirmation
