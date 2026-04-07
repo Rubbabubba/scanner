@@ -1,5 +1,5 @@
-# Patch 060
+# Patch 061
 
-Scanner marker/build sync for tc1 true breakout entry logic.
+Scanner marker/build sync for tc1 breakout observability + selective unlock.
 
-Build marker updated to `patch-060-scanner-marker-sync-tc1-true-breakout`.
+Build marker updated to `patch-061-scanner-marker-sync-tc1-breakout-observability-unlock`.
