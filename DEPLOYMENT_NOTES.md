@@ -1,5 +1,5 @@
-# Patch 061
+# Patch 062
 
-Scanner marker/build sync for tc1 breakout observability + selective unlock.
+Scanner marker/build sync for scan-entry 500 fix baseline.
 
-Build marker updated to `patch-061-scanner-marker-sync-tc1-breakout-observability-unlock`.
+Build marker updated to `patch-062-scanner-marker-sync-scan-entry-500-fix`.

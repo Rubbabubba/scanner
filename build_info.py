@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-PATCH_VERSION = "patch-061-scanner-marker-sync-tc1-breakout-observability-unlock"
+PATCH_VERSION = "patch-062-scanner-marker-sync-scan-entry-500-fix"
 BUILD_TIMESTAMP_UTC = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 SYSTEM_NAME = "crypto-system"
 DEFAULT_SERVICE_ROLE = "scanner"
@@ -52,7 +52,7 @@ def build_payload(expected_files: list[str] | None = None) -> dict:
         "kraken_spot.py",
         "kraken_futures.py",
         "requirements.txt",
-        "PATCH_061_MARKER.txt",
+        "PATCH_062_MARKER.txt",
     ]
     manifest = []
     digest_paths: list[Path] = []
