@@ -1,0 +1,1 @@
+Patch 063 scanner marker sync for candidate_meta scope fix baseline
