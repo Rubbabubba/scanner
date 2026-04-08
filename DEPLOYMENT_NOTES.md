@@ -1,5 +1,5 @@
-# Patch 065
+# Patch 066
 
-Scanner marker/build sync for tc1 zero-result observability refinement baseline.
+Scanner marker/build sync for forced-edge profitability gate baseline.
 
-Build marker updated to `patch-065-scanner-marker-sync-zero-result-observability`.
+Build marker updated to `patch-066-scanner-marker-sync-forced-edge-profitability`.

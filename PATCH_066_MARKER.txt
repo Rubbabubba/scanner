@@ -1,0 +1,1 @@
+Patch 066 scanner marker sync for forced-edge profitability gate baseline
