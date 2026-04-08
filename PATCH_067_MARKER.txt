@@ -1,0 +1,1 @@
+Patch 067 scanner marker sync for tc1 forced-edge observability + legacy-plan isolation
