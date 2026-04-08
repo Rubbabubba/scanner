@@ -1,5 +1,5 @@
-# Patch 063
+# Patch 064
 
-Scanner marker/build sync for candidate_meta scope fix baseline.
+Scanner marker/build sync for lifecycle position-ledger open-row fix baseline.
 
-Build marker updated to `patch-063-scanner-marker-sync-candidate-meta-scope-fix`.
+Build marker updated to `patch-064-scanner-marker-sync-position-ledger-open-row-fix`.
