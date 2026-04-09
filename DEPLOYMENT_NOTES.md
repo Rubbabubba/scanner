@@ -1,5 +1,5 @@
-# Patch 069
+# Patch 070
 
-Scanner marker/build sync for broker-state cache enforcement + worker route timeout hardening.
+Scanner marker/build sync for broker-truth consistency + orphan-plan cleanup + tc1 post-entry protection.
 
-Build marker updated to `patch-069-scanner-marker-sync-broker-cache-timeout-hardening`.
+Build marker updated to `patch-070-scanner-marker-sync-broker-truth-orphan-protection`.
