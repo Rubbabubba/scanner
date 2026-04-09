@@ -1,5 +1,5 @@
-# Patch 068
+# Patch 069
 
-Scanner marker/build sync for Kraken balance-rate-limit hardening + tc1 exit quality upgrade.
+Scanner marker/build sync for broker-state cache enforcement + worker route timeout hardening.
 
-Build marker updated to `patch-068-scanner-marker-sync-rate-limit-hardening-exit-quality`.
+Build marker updated to `patch-069-scanner-marker-sync-broker-cache-timeout-hardening`.
