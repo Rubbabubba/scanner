@@ -1,1 +1,1 @@
-patch-073-scanner-sync-marker
+patch-073-sync-marker
