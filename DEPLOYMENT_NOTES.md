@@ -1,1 +1,1 @@
-Patch 080 scanner sync marker.
+Patch 085 scanner sync marker only.
