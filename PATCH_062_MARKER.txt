@@ -1,1 +1,0 @@
-Patch 062 scanner marker sync for scan-entry 500 fix baseline
