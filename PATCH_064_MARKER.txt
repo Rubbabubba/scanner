@@ -1,1 +1,0 @@
-Patch 064 scanner marker sync for lifecycle position-ledger open-row fix baseline
