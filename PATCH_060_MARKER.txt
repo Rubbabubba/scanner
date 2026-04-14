@@ -1,1 +1,0 @@
-Patch 060 scanner marker sync for tc1 true breakout entry logic
