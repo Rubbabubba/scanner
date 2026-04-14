@@ -1,1 +1,0 @@
-Patch 077: scanner sync marker
