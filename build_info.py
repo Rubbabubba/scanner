@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-PATCH_VERSION = "patch-089-marker-hygiene-and-adaptive-entry-quality-engine"
+PATCH_VERSION = "patch-090-dynamic-universe-expansion-and-opportunity-mode"
 BUILD_TIMESTAMP_UTC = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 SYSTEM_NAME = "crypto-system"
 DEFAULT_SERVICE_ROLE = "scanner"

@@ -124,6 +124,14 @@ SMART_RANKING_PREFERRED_BASES = [
     ).split(",") if s.strip()
 ]
 SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED = _env_bool("SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED", True)
+OPPORTUNITY_MODE_ENABLED = _env_bool("OPPORTUNITY_MODE_ENABLED", True)
+OPPORTUNITY_MODE_TARGET_ACTIVE = int(os.getenv("OPPORTUNITY_MODE_TARGET_ACTIVE", "4") or 4)
+OPPORTUNITY_MODE_PREFERRED_BASES = [
+    s.strip().upper() for s in os.getenv(
+        "OPPORTUNITY_MODE_PREFERRED_BASES",
+        "BTC,ETH,SOL,ADA,LINK,AVAX,DOT"
+    ).split(",") if s.strip()
+]
 
 def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
     symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
@@ -151,6 +159,44 @@ def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[st
         "after_count": len(filtered),
         "removed_symbols": removed[:24],
     }
+
+
+def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tuple[str, float, List[str], float, float]], scored_lookup: Dict[str, Tuple[float, List[str]]]) -> tuple[List[str], Dict[str, Any]]:
+    symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
+    target = max(0, int(OPPORTUNITY_MODE_TARGET_ACTIVE))
+    preferred = [str(s or '').upper() for s in (OPPORTUNITY_MODE_PREFERRED_BASES or []) if str(s or '').strip()]
+    meta = {
+        "enabled": bool(OPPORTUNITY_MODE_ENABLED),
+        "target_active": target,
+        "preferred_bases": preferred,
+        "before_count": len(symbols),
+        "after_count": len(symbols),
+        "added_symbols": [],
+    }
+    if not OPPORTUNITY_MODE_ENABLED or target <= 0 or len(symbols) >= target:
+        return symbols, meta
+    chosen = set(symbols)
+    for base in preferred:
+        if len(symbols) >= target:
+            break
+        item = best_any.get(base)
+        if not item:
+            continue
+        sym, total, reasons, usd_vol, rng = item
+        sym = str(sym or '').upper()
+        if not sym or sym in chosen:
+            continue
+        symbols.append(sym)
+        chosen.add(sym)
+        meta["added_symbols"].append(sym)
+        if sym not in scored_lookup:
+            scored_lookup[sym] = (float(total), list(reasons) + ["opportunity_mode"])
+        else:
+            sc, rs = scored_lookup[sym]
+            if "opportunity_mode" not in rs:
+                scored_lookup[sym] = (float(sc), list(rs) + ["opportunity_mode"])
+    meta["after_count"] = len(symbols)
+    return symbols, meta
 
 def _quality_gate(total: float, reasons: List[str]) -> tuple[bool, Dict[str, Any]]:
     reason_list = [str(r or '').strip() for r in (reasons or []) if str(r or '').strip()]
@@ -747,6 +793,7 @@ def _compute_scan() -> Dict[str, Any]:
     candidate_symbols, alignment_meta = _apply_alignment(candidate_symbols, scored_lookup, set(str(s or '').upper() for s in pairs))
     candidate_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(candidate_symbols)
     candidate_symbols, final_emit_meta = _apply_final_emit_hard_filter(candidate_symbols)
+    candidate_symbols, opportunity_meta = _apply_opportunity_mode(candidate_symbols, best_any, scored_lookup)
     active_symbols, emission_meta = _apply_scanner_emission_controls(candidate_symbols)
     top_by_symbol = {str(s).upper(): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
     top_by_symbol.update(scored_lookup)
@@ -812,6 +859,7 @@ def _compute_scan() -> Dict[str, Any]:
                 "preferred_bases": list(SMART_RANKING_PREFERRED_BASES),
             },
             "alignment": alignment_meta,
+            "opportunity_mode": opportunity_meta,
             "strict_thresholds": {
                 "min_24h_usd_vol": MIN_24H_USD_VOL,
                 "min_24h_range_pct": MIN_24H_RANGE_PCT,

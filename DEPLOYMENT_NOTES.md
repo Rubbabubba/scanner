@@ -1,1 +1,1 @@
-Patch 085 scanner sync marker only.
+Patch 090: dynamic universe expansion + opportunity mode. No env changes required.
