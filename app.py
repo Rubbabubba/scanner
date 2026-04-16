@@ -123,6 +123,34 @@ SMART_RANKING_PREFERRED_BASES = [
         "BTC,ETH,SOL,ADA,LINK,AVAX,DOT"
     ).split(",") if s.strip()
 ]
+SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED = _env_bool("SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED", True)
+
+def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
+    symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
+    preferred = {str(s or '').upper() for s in SMART_RANKING_PREFERRED_BASES if str(s or '').strip()}
+    if not SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED or not preferred:
+        return symbols, {
+            "enabled": bool(SMART_RANKING_FINAL_EMIT_HARD_FILTER_ENABLED),
+            "preferred_bases": list(SMART_RANKING_PREFERRED_BASES),
+            "before_count": len(symbols),
+            "after_count": len(symbols),
+            "removed_symbols": [],
+        }
+    filtered = []
+    removed = []
+    for sym in symbols:
+        base = _base(sym)
+        if base in preferred:
+            filtered.append(sym)
+        else:
+            removed.append(sym)
+    return filtered, {
+        "enabled": True,
+        "preferred_bases": list(SMART_RANKING_PREFERRED_BASES),
+        "before_count": len(symbols),
+        "after_count": len(filtered),
+        "removed_symbols": removed[:24],
+    }
 
 def _quality_gate(total: float, reasons: List[str]) -> tuple[bool, Dict[str, Any]]:
     reason_list = [str(r or '').strip() for r in (reasons or []) if str(r or '').strip()]
@@ -718,6 +746,7 @@ def _compute_scan() -> Dict[str, Any]:
     candidate_symbols = [str(s or '').upper() for (s, _, _, _, _) in filtered_top]
     candidate_symbols, alignment_meta = _apply_alignment(candidate_symbols, scored_lookup, set(str(s or '').upper() for s in pairs))
     candidate_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(candidate_symbols)
+    candidate_symbols, final_emit_meta = _apply_final_emit_hard_filter(candidate_symbols)
     active_symbols, emission_meta = _apply_scanner_emission_controls(candidate_symbols)
     top_by_symbol = {str(s).upper(): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
     top_by_symbol.update(scored_lookup)
