@@ -1,6 +1,8 @@
+
 from __future__ import annotations
 
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Iterable
+
 
 def compute_atr(closes: List[float], period: int = 14) -> float:
     if len(closes) < period + 2:
@@ -10,6 +12,7 @@ def compute_atr(closes: List[float], period: int = 14) -> float:
         trs.append(abs(closes[i] - closes[i - 1]))
     window = trs[-period:]
     return sum(window) / max(1, len(window))
+
 
 def score_spot(t: Dict[str, Any], atr: float, spread_pct: float | None) -> Tuple[float, List[str]]:
     reasons: List[str] = []
@@ -36,10 +39,9 @@ def score_spot(t: Dict[str, Any], atr: float, spread_pct: float | None) -> Tuple
 
     # ATR (proxy for "alive now")
     if atr > 0:
-        # no absolute scale; just give a small constant boost for measurable movement
         score += 1; reasons.append("atr_active")
 
-    # Spread penalty
+    # Spread penalty/reward
     if spread_pct is not None:
         if spread_pct <= 0.0015:
             score += 1; reasons.append("tight_spread")
@@ -48,12 +50,8 @@ def score_spot(t: Dict[str, Any], atr: float, spread_pct: float | None) -> Tuple
 
     return score, reasons
 
+
 def score_futures_bonus(symbol_ui: str, fut: Dict[str, Any]) -> Tuple[float, List[str]]:
-    """
-    fut is a dict from futures_snapshot() keyed by base symbol (e.g. BTC, ETH, SOL…)
-    We map UI symbol BTC/USDT etc -> base BTC.
-    Bonus is conservative: +0..+3
-    """
     reasons: List[str] = []
     base = symbol_ui.split("/", 1)[0].upper()
 
@@ -67,7 +65,6 @@ def score_futures_bonus(symbol_ui: str, fut: Dict[str, Any]) -> Tuple[float, Lis
     oi = x.get("open_interest_usd")
     oi_chg = x.get("open_interest_change_pct_24h")
 
-    # Funding extremes (proxy for crowded positioning)
     if fr is not None:
         afr = abs(float(fr))
         if afr >= 0.0002:
@@ -75,15 +72,56 @@ def score_futures_bonus(symbol_ui: str, fut: Dict[str, Any]) -> Tuple[float, Lis
         elif afr >= 0.0001:
             score += 1; reasons.append("funding_elevated")
 
-    # OI spike
     if oi_chg is not None:
         if float(oi_chg) >= 0.20:
             score += 2; reasons.append("oi_spike_20p")
         elif float(oi_chg) >= 0.10:
             score += 1; reasons.append("oi_spike_10p")
 
-    # Big OI base (institutional interest)
     if oi is not None and float(oi) >= 50_000_000:
         score += 1; reasons.append("oi_large")
+
+    return score, reasons
+
+
+def score_ranking_bias(
+    symbol_ui: str,
+    t: Dict[str, Any],
+    spread_pct: float | None,
+    preferred_bases: Iterable[str] | None = None,
+) -> Tuple[float, List[str]]:
+    """Bias rankings toward liquid, tighter-spread preferred majors without requiring env changes."""
+    reasons: List[str] = []
+    score = 0.0
+    base = symbol_ui.split("/", 1)[0].upper()
+    preferred = {str(x).strip().upper() for x in (preferred_bases or []) if str(x).strip()}
+    vol_usd = float(t.get("vol_usd") or 0.0)
+    rng = float(t.get("range_pct") or 0.0)
+
+    if base in preferred:
+        score += 2.5; reasons.append("preferred_major_bias")
+
+    if vol_usd >= 100_000_000:
+        score += 2.0; reasons.append("liq_100m_bias")
+    elif vol_usd >= 25_000_000:
+        score += 1.25; reasons.append("liq_25m_bias")
+    elif vol_usd >= 10_000_000:
+        score += 0.75; reasons.append("liq_10m_bias")
+
+    if spread_pct is not None:
+        if spread_pct <= 0.0010:
+            score += 1.0; reasons.append("spread_elite_bias")
+        elif spread_pct <= 0.0018:
+            score += 0.5; reasons.append("spread_good_bias")
+        elif spread_pct >= 0.0025:
+            score -= 1.0; reasons.append("spread_drag_penalty")
+
+    if rng >= 0.07 and vol_usd >= 10_000_000:
+        score += 1.0; reasons.append("trend_liquidity_combo")
+    elif rng >= 0.05 and vol_usd >= 5_000_000:
+        score += 0.5; reasons.append("trend_support_combo")
+
+    if base not in preferred and vol_usd < 5_000_000:
+        score -= 1.25; reasons.append("tail_liquidity_penalty")
 
     return score, reasons

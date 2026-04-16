@@ -16,7 +16,7 @@ from build_info import build_payload
 
 # ✅ repo is flat (root-level imports)
 from kraken_spot import list_spot_pairs, ticker_24h
-from scoring import score_spot, score_futures_bonus
+from scoring import score_spot, score_futures_bonus, score_ranking_bias
 
 FUTURES_ENABLED = os.getenv("FUTURES_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 if FUTURES_ENABLED:
@@ -116,6 +116,13 @@ SCANNER_MIN_REASON_COUNT = int(os.getenv("SCANNER_MIN_REASON_COUNT", "0") or 0)
 SCANNER_REQUIRE_RANGE_OR_VOLUME = _env_bool("SCANNER_REQUIRE_RANGE_OR_VOLUME", False)
 SCANNER_DROP_TIGHT_SPREAD_ONLY = _env_bool("SCANNER_DROP_TIGHT_SPREAD_ONLY", False)
 SCANNER_DROP_ATR_AND_SPREAD_ONLY = _env_bool("SCANNER_DROP_ATR_AND_SPREAD_ONLY", False)
+SMART_RANKING_BIAS_ENABLED = _env_bool("SMART_RANKING_BIAS_ENABLED", True)
+SMART_RANKING_PREFERRED_BASES = [
+    s.strip().upper() for s in os.getenv(
+        "SMART_RANKING_PREFERRED_BASES",
+        "BTC,ETH,SOL,ADA,LINK,AVAX,DOT"
+    ).split(",") if s.strip()
+]
 
 def _quality_gate(total: float, reasons: List[str]) -> tuple[bool, Dict[str, Any]]:
     reason_list = [str(r or '').strip() for r in (reasons or []) if str(r or '').strip()]
@@ -601,11 +608,21 @@ def _compute_scan() -> Dict[str, Any]:
         if fut is not None:
             bonus, bonus_reasons = score_futures_bonus(sym, fut)
 
-        total = float(spot_score + bonus)
+        ranking_bias = 0.0
+        ranking_bias_reasons: List[str] = []
+        if SMART_RANKING_BIAS_ENABLED:
+            ranking_bias, ranking_bias_reasons = score_ranking_bias(
+                sym,
+                t,
+                spread_pct=spread_pct,
+                preferred_bases=SMART_RANKING_PREFERRED_BASES,
+            )
+
+        total = float(spot_score + bonus + ranking_bias)
         if total <= 0:
             continue
 
-        reasons = spot_reasons + bonus_reasons
+        reasons = spot_reasons + bonus_reasons + ranking_bias_reasons
         quality_ok, quality_meta = _quality_gate(float(total), list(reasons))
         if not quality_ok:
             continue
@@ -760,6 +777,10 @@ def _compute_scan() -> Dict[str, Any]:
                 "require_range_or_volume": bool(SCANNER_REQUIRE_RANGE_OR_VOLUME),
                 "drop_tight_spread_only": bool(SCANNER_DROP_TIGHT_SPREAD_ONLY),
                 "drop_atr_and_spread_only": bool(SCANNER_DROP_ATR_AND_SPREAD_ONLY),
+            },
+            "smart_ranking_bias": {
+                "enabled": bool(SMART_RANKING_BIAS_ENABLED),
+                "preferred_bases": list(SMART_RANKING_PREFERRED_BASES),
             },
             "alignment": alignment_meta,
             "strict_thresholds": {
