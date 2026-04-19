@@ -1,1 +1,3 @@
-Patch 092: opportunity expansion + trigger timing calibration. No env changes required.
+# Patch 094
+
+Scanner: marker/build sync only.
