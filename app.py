@@ -132,7 +132,11 @@ OPPORTUNITY_MODE_PREFERRED_BASES = [
         "BTC,ETH,SOL,ADA,LINK,AVAX,DOT"
     ).split(",") if s.strip()
 ]
-OPPORTUNITY_MODE_MIN_BACKFILL_SCORE = float(os.getenv("OPPORTUNITY_MODE_MIN_BACKFILL_SCORE", "2.5") or 2.5)
+OPPORTUNITY_MODE_MIN_BACKFILL_SCORE = float(os.getenv("OPPORTUNITY_MODE_MIN_BACKFILL_SCORE", "1.25") or 1.25)
+OPPORTUNITY_MODE_SOFT_BACKFILL_ENABLED = _env_bool("OPPORTUNITY_MODE_SOFT_BACKFILL_ENABLED", True)
+OPPORTUNITY_MODE_SOFT_MIN_USD_VOL = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_USD_VOL", str(FALLBACK_MIN_24H_USD_VOL)) or FALLBACK_MIN_24H_USD_VOL)
+OPPORTUNITY_MODE_SOFT_MIN_RANGE_PCT = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_RANGE_PCT", str(ATR_ACTIVE_MIN_RANGE_PCT)) or ATR_ACTIVE_MIN_RANGE_PCT)
+OPPORTUNITY_MODE_SOFT_MIN_SCORE = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_SCORE", "0.5") or 0.5)
 
 def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
     symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
@@ -162,7 +166,7 @@ def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[st
     }
 
 
-def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tuple[str, float, List[str], float, float]], scored_lookup: Dict[str, Tuple[float, List[str]]], backfill_any: Optional[Dict[str, Tuple[str, float, List[str], float, float]]] = None) -> tuple[List[str], Dict[str, Any]]:
+def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tuple[str, float, List[str], float, float]], scored_lookup: Dict[str, Tuple[float, List[str]]], backfill_any: Optional[Dict[str, Tuple[str, float, List[str], float, float]]] = None, soft_backfill_any: Optional[Dict[str, Tuple[str, float, List[str], float, float]]] = None) -> tuple[List[str], Dict[str, Any]]:
     symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
     target = max(0, int(OPPORTUNITY_MODE_TARGET_ACTIVE))
     preferred = [str(s or '').upper() for s in (OPPORTUNITY_MODE_PREFERRED_BASES or []) if str(s or '').strip()]
@@ -178,10 +182,11 @@ def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tu
         return symbols, meta
     chosen = set(symbols)
     fallback_any = backfill_any or {}
+    soft_any = soft_backfill_any or {}
     for base in preferred:
         if len(symbols) >= target:
             break
-        item = best_any.get(base) or fallback_any.get(base)
+        item = best_any.get(base) or fallback_any.get(base) or soft_any.get(base)
         if not item:
             continue
         sym, total, reasons, usd_vol, rng = item
@@ -193,7 +198,12 @@ def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tu
         symbols.append(sym)
         chosen.add(sym)
         meta["added_symbols"].append(sym)
-        extra_reason = "opportunity_backfill" if base not in best_any and base in fallback_any else "opportunity_mode"
+        if base not in best_any and base in fallback_any:
+            extra_reason = "opportunity_backfill"
+        elif base not in best_any and base in soft_any:
+            extra_reason = "opportunity_soft_backfill"
+        else:
+            extra_reason = "opportunity_mode"
         if sym not in scored_lookup:
             scored_lookup[sym] = (float(total), list(reasons) + [extra_reason])
         else:
@@ -662,6 +672,8 @@ def _compute_scan() -> Dict[str, Any]:
 
     # Best preferred-major candidate after spread filter and positive score, even if strict quality gate fails.
     backfill_any: Dict[str, Tuple[str, float, List[str], float, float]] = {}
+    # Soft preferred-major fallback for opportunity expansion when the strict pools are too thin.
+    soft_backfill_any: Dict[str, Tuple[str, float, List[str], float, float]] = {}
 
     seen_pairs = 0
     spread_filtered = 0
@@ -712,6 +724,11 @@ def _compute_scan() -> Dict[str, Any]:
             prev_backfill = backfill_any.get(b)
             if prev_backfill is None or total > prev_backfill[1] or (total == prev_backfill[1] and usd_vol > prev_backfill[3]) or (total == prev_backfill[1] and usd_vol == prev_backfill[3] and rng > prev_backfill[4]):
                 backfill_any[b] = (sym, total, list(reasons), usd_vol, rng)
+            if OPPORTUNITY_MODE_SOFT_BACKFILL_ENABLED and float(total) >= float(OPPORTUNITY_MODE_SOFT_MIN_SCORE) and float(usd_vol) >= float(OPPORTUNITY_MODE_SOFT_MIN_USD_VOL) and float(rng) >= float(OPPORTUNITY_MODE_SOFT_MIN_RANGE_PCT):
+                prev_soft = soft_backfill_any.get(b)
+                soft_reasons = list(reasons) + ["opportunity_soft_pool"]
+                if prev_soft is None or total > prev_soft[1] or (total == prev_soft[1] and usd_vol > prev_soft[3]) or (total == prev_soft[1] and usd_vol == prev_soft[3] and rng > prev_soft[4]):
+                    soft_backfill_any[b] = (sym, total, soft_reasons, usd_vol, rng)
         quality_ok, quality_meta = _quality_gate(float(total), list(reasons))
         if not quality_ok:
             continue
@@ -807,7 +824,7 @@ def _compute_scan() -> Dict[str, Any]:
     candidate_symbols, alignment_meta = _apply_alignment(candidate_symbols, scored_lookup, set(str(s or '').upper() for s in pairs))
     candidate_symbols, holdoff_meta = _apply_scanner_symbol_holdoff(candidate_symbols)
     candidate_symbols, final_emit_meta = _apply_final_emit_hard_filter(candidate_symbols)
-    candidate_symbols, opportunity_meta = _apply_opportunity_mode(candidate_symbols, best_any, scored_lookup, backfill_any)
+    candidate_symbols, opportunity_meta = _apply_opportunity_mode(candidate_symbols, best_any, scored_lookup, backfill_any, soft_backfill_any)
     active_symbols, emission_meta = _apply_scanner_emission_controls(candidate_symbols)
     top_by_symbol = {str(s).upper(): (sc, rs) for (s, sc, rs, _, _) in filtered_top}
     top_by_symbol.update(scored_lookup)

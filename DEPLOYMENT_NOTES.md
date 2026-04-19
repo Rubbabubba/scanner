@@ -1,1 +1,1 @@
-Patch 090: dynamic universe expansion + opportunity mode. No env changes required.
+Patch 092: opportunity expansion + trigger timing calibration. No env changes required.
