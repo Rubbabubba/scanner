@@ -137,6 +137,13 @@ OPPORTUNITY_MODE_SOFT_BACKFILL_ENABLED = _env_bool("OPPORTUNITY_MODE_SOFT_BACKFI
 OPPORTUNITY_MODE_SOFT_MIN_USD_VOL = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_USD_VOL", str(FALLBACK_MIN_24H_USD_VOL)) or FALLBACK_MIN_24H_USD_VOL)
 OPPORTUNITY_MODE_SOFT_MIN_RANGE_PCT = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_RANGE_PCT", str(ATR_ACTIVE_MIN_RANGE_PCT)) or ATR_ACTIVE_MIN_RANGE_PCT)
 OPPORTUNITY_MODE_SOFT_MIN_SCORE = float(os.getenv("OPPORTUNITY_MODE_SOFT_MIN_SCORE", "0.5") or 0.5)
+TIERED_UNIVERSE_ENABLED = _env_bool("TIERED_UNIVERSE_ENABLED", True)
+TIER1_PREFERRED_BASES = [str(s or '').upper() for s in SMART_RANKING_PREFERRED_BASES if str(s or '').strip()]
+TIER2_CANDIDATE_BASES = [str(s or '').upper() for s in _csv("TIER2_CANDIDATE_BASES", "AAVE,NEAR,UNI,SUI,ONDO,TON,BCH,LTC,XRP,DOGE,CRV,COMP,MORPHO,NIGHT,MON,PENGU,FET,ENA,GWEI") if str(s or '').strip()]
+TIER2_TARGET_ACTIVE = int(os.getenv("TIER2_TARGET_ACTIVE", str(OPPORTUNITY_MODE_TARGET_ACTIVE or 4)) or (OPPORTUNITY_MODE_TARGET_ACTIVE or 4))
+TIER2_MIN_SCORE = float(os.getenv("TIER2_MIN_SCORE", "4.0") or 4.0)
+TIER2_MIN_USD_VOL = float(os.getenv("TIER2_MIN_USD_VOL", str(max(STRICT_MIN_24H_USD_VOL, FALLBACK_MIN_24H_USD_VOL))) or max(STRICT_MIN_24H_USD_VOL, FALLBACK_MIN_24H_USD_VOL))
+TIER2_MIN_RANGE_PCT = float(os.getenv("TIER2_MIN_RANGE_PCT", str(max(STRICT_MIN_24H_RANGE_PCT, ATR_ACTIVE_MIN_RANGE_PCT))) or max(STRICT_MIN_24H_RANGE_PCT, ATR_ACTIVE_MIN_RANGE_PCT))
 
 def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[str], Dict[str, Any]]:
     symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
@@ -168,42 +175,36 @@ def _apply_final_emit_hard_filter(candidate_symbols: List[str]) -> tuple[List[st
 
 def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tuple[str, float, List[str], float, float]], scored_lookup: Dict[str, Tuple[float, List[str]]], backfill_any: Optional[Dict[str, Tuple[str, float, List[str], float, float]]] = None, soft_backfill_any: Optional[Dict[str, Tuple[str, float, List[str], float, float]]] = None) -> tuple[List[str], Dict[str, Any]]:
     symbols = [str(s or '').upper() for s in (candidate_symbols or []) if str(s or '').strip()]
-    target = max(0, int(OPPORTUNITY_MODE_TARGET_ACTIVE))
+    target = max(0, int(TIER2_TARGET_ACTIVE if TIERED_UNIVERSE_ENABLED else OPPORTUNITY_MODE_TARGET_ACTIVE))
     preferred = [str(s or '').upper() for s in (OPPORTUNITY_MODE_PREFERRED_BASES or []) if str(s or '').strip()]
+    tier2_bases = [str(s or '').upper() for s in (TIER2_CANDIDATE_BASES or []) if str(s or '').strip()]
     meta = {
         "enabled": bool(OPPORTUNITY_MODE_ENABLED),
+        "tiered_universe_enabled": bool(TIERED_UNIVERSE_ENABLED),
         "target_active": target,
         "preferred_bases": preferred,
+        "tier2_bases": tier2_bases,
         "before_count": len(symbols),
         "after_count": len(symbols),
         "added_symbols": [],
+        "tier2_added_symbols": [],
+        "vetted_symbols": list(symbols),
     }
     if not OPPORTUNITY_MODE_ENABLED or target <= 0 or len(symbols) >= target:
         return symbols, meta
     chosen = set(symbols)
     fallback_any = backfill_any or {}
     soft_any = soft_backfill_any or {}
-    for base in preferred:
-        if len(symbols) >= target:
-            break
-        item = best_any.get(base) or fallback_any.get(base) or soft_any.get(base)
-        if not item:
-            continue
-        sym, total, reasons, usd_vol, rng = item
-        sym = str(sym or '').upper()
-        if not sym or sym in chosen:
-            continue
-        if float(total) < float(OPPORTUNITY_MODE_MIN_BACKFILL_SCORE):
-            continue
+
+    def _choose_item(base: str):
+        return best_any.get(base) or fallback_any.get(base) or soft_any.get(base)
+
+    def _append(sym: str, total: float, reasons: List[str], extra_reason: str, *, tier2: bool = False):
         symbols.append(sym)
         chosen.add(sym)
         meta["added_symbols"].append(sym)
-        if base not in best_any and base in fallback_any:
-            extra_reason = "opportunity_backfill"
-        elif base not in best_any and base in soft_any:
-            extra_reason = "opportunity_soft_backfill"
-        else:
-            extra_reason = "opportunity_mode"
+        if tier2:
+            meta["tier2_added_symbols"].append(sym)
         if sym not in scored_lookup:
             scored_lookup[sym] = (float(total), list(reasons) + [extra_reason])
         else:
@@ -212,7 +213,51 @@ def _apply_opportunity_mode(candidate_symbols: List[str], best_any: Dict[str, Tu
             if extra_reason not in rs2:
                 rs2.append(extra_reason)
             scored_lookup[sym] = (float(sc), rs2)
+
+    for base in preferred:
+        if len(symbols) >= target:
+            break
+        item = _choose_item(base)
+        if not item:
+            continue
+        sym, total, reasons, usd_vol, rng = item
+        sym = str(sym or '').upper()
+        if not sym or sym in chosen or float(total) < float(OPPORTUNITY_MODE_MIN_BACKFILL_SCORE):
+            continue
+        extra_reason = "opportunity_mode"
+        if base not in best_any and base in fallback_any:
+            extra_reason = "opportunity_backfill"
+        elif base not in best_any and base in soft_any:
+            extra_reason = "opportunity_soft_backfill"
+        _append(sym, total, list(reasons), extra_reason, tier2=False)
+
+    if TIERED_UNIVERSE_ENABLED and len(symbols) < target:
+        tier2_pool = []
+        for base in tier2_bases:
+            item = _choose_item(base)
+            if not item:
+                continue
+            sym, total, reasons, usd_vol, rng = item
+            sym = str(sym or '').upper()
+            if not sym or sym in chosen:
+                continue
+            if float(total) < float(TIER2_MIN_SCORE):
+                continue
+            if float(usd_vol) < float(TIER2_MIN_USD_VOL):
+                continue
+            if float(rng) < float(TIER2_MIN_RANGE_PCT):
+                continue
+            if 'tight_spread' not in set(str(r or '').strip() for r in (reasons or [])):
+                continue
+            tier2_pool.append((sym, float(total), list(reasons), float(usd_vol), float(rng)))
+        tier2_pool.sort(key=lambda x: (x[1], x[3], x[4]), reverse=True)
+        for sym, total, reasons, usd_vol, rng in tier2_pool:
+            if len(symbols) >= target:
+                break
+            _append(sym, total, reasons, 'tier2_opportunity', tier2=True)
+
     meta["after_count"] = len(symbols)
+    meta["vetted_symbols"] = list(symbols)
     return symbols, meta
 
 def _quality_gate(total: float, reasons: List[str]) -> tuple[bool, Dict[str, Any]]:
@@ -891,6 +936,7 @@ def _compute_scan() -> Dict[str, Any]:
             },
             "alignment": alignment_meta,
             "opportunity_mode": opportunity_meta,
+            "tiered_universe": {"enabled": bool(TIERED_UNIVERSE_ENABLED), "tier1_bases": list(TIER1_PREFERRED_BASES), "tier2_bases": list(TIER2_CANDIDATE_BASES), "vetted_symbols": list(opportunity_meta.get("vetted_symbols") or []), "tier2_added_symbols": list(opportunity_meta.get("tier2_added_symbols") or [])},
             "strict_thresholds": {
                 "min_24h_usd_vol": MIN_24H_USD_VOL,
                 "min_24h_range_pct": MIN_24H_RANGE_PCT,
