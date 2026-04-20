@@ -110,6 +110,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _csv(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default)
+    return [part.strip() for part in str(raw or "").split(",") if part and part.strip()]
+
 
 SCANNER_MIN_SCORE = float(os.getenv("SCANNER_MIN_SCORE", "0") or 0)
 SCANNER_MIN_REASON_COUNT = int(os.getenv("SCANNER_MIN_REASON_COUNT", "0") or 0)
