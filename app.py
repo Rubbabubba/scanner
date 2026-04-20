@@ -46,6 +46,10 @@ FILL_TO_TOP_N = os.getenv("FILL_TO_TOP_N", "1").strip().lower() in ("1", "true",
 FALLBACK_MIN_24H_USD_VOL = float(os.getenv("FALLBACK_MIN_24H_USD_VOL", "1000000") or 1000000)  # $1.0m
 FALLBACK_MIN_24H_RANGE_PCT = float(os.getenv("FALLBACK_MIN_24H_RANGE_PCT", "0.025") or 0.025)  # 2.5%
 
+# Stricter thresholds for vetted tier-2 names
+STRICT_MIN_24H_USD_VOL = float(os.getenv("STRICT_MIN_24H_USD_VOL", "1500000") or 1500000)
+STRICT_MIN_24H_RANGE_PCT = float(os.getenv("STRICT_MIN_24H_RANGE_PCT", "0.018") or 0.018)
+
 # ATR-active proxy (we avoid per-symbol OHLC calls for reliability)
 ATR_ACTIVE_MIN_RANGE_PCT = float(os.getenv("ATR_ACTIVE_MIN_RANGE_PCT", "0.02") or 0.02)  # 2%
 
