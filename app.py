@@ -1138,6 +1138,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
         },
     }
     alignment = dict(raw.get("alignment") or {})
+    vetted_symbols = list(raw.get("vetted_symbols") or ((raw.get("tiered_universe") or {}).get("vetted_symbols") if isinstance(raw.get("tiered_universe"), dict) else []) or ((raw.get("opportunity_mode") or {}).get("vetted_symbols") if isinstance(raw.get("opportunity_mode"), dict) else []) or [])
     return {
         "scanner_ok": bool(CACHE.get("ts") is not None) and not bool(CACHE.get("last_error")),
         "mode": _scanner_mode(),
@@ -1164,6 +1165,7 @@ def _compatibility_payload_unlocked() -> Dict[str, Any]:
             "force_emit_resolution": list(alignment.get("force_emit_resolution") or []),
             "active_symbols_all_admissible": bool(active_symbols) and all(str(s or '').upper() in set(list(alignment.get("force_emit_symbols_valid") or []) or list(alignment.get("force_emit_symbols") or [])) for s in active_symbols) if bool(alignment.get("emit_only")) else False,
         },
+        "vetted_symbols": vetted_symbols,
         "fee_churn_truth": fee_churn_truth,
     }
 
